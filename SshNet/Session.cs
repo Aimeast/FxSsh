@@ -1,4 +1,5 @@
-﻿using System;
+﻿using SshNet.Messages;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Globalization;
@@ -51,14 +52,27 @@ namespace SshNet
             var clientIdVersions = ClientVersion.Split('-')[1];
             if (clientIdVersions != "2.0")
             {
-                // TODO: send disconnect message
-                throw new NotSupportedException(string.Format("Not supported for client SSH version {0}.", clientIdVersions));
+                Disconnect(DisconnectReason.ProtocolVersionNotSupported, "This server only supports SSH v2.0.");
+                throw new NotSupportedException(
+                    string.Format("Not supported for client SSH version {0}. This server only supports SSH v2.0.", clientIdVersions));
             }
         }
 
         public void Disconnect()
         {
+            Disconnect(DisconnectReason.ByApplication, "Connection terminated by the server.");
+        }
+
+        public void Disconnect(DisconnectReason reason, string description)
+        {
+            if (reason == DisconnectReason.ByApplication)
+            {
+                var message = new DisconnectMessage(reason, description);
+                TrySendMessage(message);
+            }
+
             _socket.Disconnect(true);
+            _socket.Dispose();
 
             if (Disconnected != null)
                 Disconnected(this, EventArgs.Empty);
@@ -183,6 +197,29 @@ namespace SshNet
                         throw;  // any serious error occurr
                 }
             } while (totalBytesSent < totalBytesToSend);
+        }
+
+        private Message ReceiveMessage()
+        {
+            throw new NotImplementedException();
+        }
+
+        private void SendMessage(Message message)
+        {
+            throw new NotImplementedException();
+        }
+
+        private bool TrySendMessage(Message message)
+        {
+            try
+            {
+                SendMessage(message);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
         }
     }
 }
