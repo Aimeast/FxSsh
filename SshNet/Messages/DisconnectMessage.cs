@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Diagnostics.Contracts;
+using System.Text;
 
 namespace SshNet.Messages
 {
@@ -22,12 +23,24 @@ namespace SshNet.Messages
 
         public override void Load(byte[] bytes)
         {
-            throw new NotImplementedException();
+            using (var worker = new SshDataWorker(bytes))
+            {
+                ReasonCode = (DisconnectReason)worker.ReadUInt32();
+                Description = worker.ReadString(Encoding.UTF8);
+                Language = worker.ReadString(Encoding.UTF8);
+            }
         }
 
         public override byte[] GetPacket()
         {
-            throw new NotImplementedException();
+            using (var worker = new SshDataWorker())
+            {
+                worker.Write((uint)ReasonCode);
+                worker.Write(Description, Encoding.UTF8);
+                worker.Write(Language ?? "en", Encoding.UTF8);
+
+                return worker.ToArray();
+            }
         }
     }
 }

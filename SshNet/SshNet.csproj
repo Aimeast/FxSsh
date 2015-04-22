@@ -47,6 +47,7 @@
     <Compile Include="Messages\MessageAttribute.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Session.cs" />
+    <Compile Include="SshDataWorker.cs" />
     <Compile Include="SshServer.cs" />
     <Compile Include="StartingInfo.cs" />
   </ItemGroup>
