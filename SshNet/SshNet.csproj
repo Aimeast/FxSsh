@@ -39,8 +39,12 @@
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Numerics" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Algorithms\DiffieHellman.cs" />
+    <Compile Include="Algorithms\DiffieHellmanGroupSha1.cs" />
+    <Compile Include="Algorithms\KexAlgorithm.cs" />
     <Compile Include="DisconnectReason.cs" />
     <Compile Include="Messages\DisconnectMessage.cs" />
     <Compile Include="Messages\Message.cs" />
