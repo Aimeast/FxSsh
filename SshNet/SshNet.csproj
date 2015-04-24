@@ -44,7 +44,10 @@
   <ItemGroup>
     <Compile Include="Algorithms\DiffieHellman.cs" />
     <Compile Include="Algorithms\DiffieHellmanGroupSha1.cs" />
+    <Compile Include="Algorithms\DssKey.cs" />
     <Compile Include="Algorithms\KexAlgorithm.cs" />
+    <Compile Include="Algorithms\PublicKeyAlgorithm.cs" />
+    <Compile Include="Algorithms\RsaKey.cs" />
     <Compile Include="DisconnectReason.cs" />
     <Compile Include="Messages\DisconnectMessage.cs" />
     <Compile Include="Messages\Message.cs" />
