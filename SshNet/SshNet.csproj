@@ -42,9 +42,12 @@
     <Reference Include="System.Numerics" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="Algorithms\CipherModeEx.cs" />
+    <Compile Include="Algorithms\CtrModeCryptoTransform.cs" />
     <Compile Include="Algorithms\DiffieHellman.cs" />
     <Compile Include="Algorithms\DiffieHellmanGroupSha1.cs" />
     <Compile Include="Algorithms\DssKey.cs" />
+    <Compile Include="Algorithms\EncryptionAlgorithm.cs" />
     <Compile Include="Algorithms\KexAlgorithm.cs" />
     <Compile Include="Algorithms\PublicKeyAlgorithm.cs" />
     <Compile Include="Algorithms\RsaKey.cs" />
