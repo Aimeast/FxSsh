@@ -1,10 +1,12 @@
-﻿using SshNet.Messages;
+﻿using SshNet.Algorithms;
+using SshNet.Messages;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Globalization;
 using System.Linq;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 
@@ -25,6 +27,17 @@ namespace SshNet
 #else
         private readonly TimeSpan _timeout = TimeSpan.FromSeconds(30);
 #endif
+        private readonly Dictionary<string, Func<AsymmetricAlgorithm, KexAlgorithm>> _keyExchangeAlgorithms =
+            new Dictionary<string, Func<AsymmetricAlgorithm, KexAlgorithm>>();
+        private readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms =
+            new Dictionary<string, Func<string, PublicKeyAlgorithm>>();
+        private readonly Dictionary<string, Func<byte[], byte[], EncryptionAlgorithm>> _encryptionAlgorithms =
+            new Dictionary<string, Func<byte[], byte[], EncryptionAlgorithm>>();
+        private readonly Dictionary<string, Func<byte[], HmacAlgorithm>> _hmacAlgorithms =
+            new Dictionary<string, Func<byte[], HmacAlgorithm>>();
+        private readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms =
+            new Dictionary<string, Func<CompressionAlgorithm>>();
+
         public string ServerVersion { get; private set; }
         public string ClientVersion { get; private set; }
 
@@ -56,6 +69,8 @@ namespace SshNet
                 throw new NotSupportedException(
                     string.Format("Not supported for client SSH version {0}. This server only supports SSH v2.0.", clientIdVersions));
             }
+
+            RegisterAlgorithms();
         }
 
         public void Disconnect()
@@ -220,6 +235,29 @@ namespace SshNet
             {
                 return false;
             }
+        }
+
+        private void RegisterAlgorithms()
+        {
+            _keyExchangeAlgorithms.Add("diffie-hellman-group14-sha1", x => new DiffieHellmanGroupSha1(new DiffieHellman(2048)));
+            _keyExchangeAlgorithms.Add("diffie-hellman-group1-sha1", x => new DiffieHellmanGroupSha1(new DiffieHellman(1024)));
+
+            _publicKeyAlgorithms.Add("ssh-rsa", x => new RsaKey(x));
+            _publicKeyAlgorithms.Add("ssh-dss", x => new DssKey(x));
+
+            _encryptionAlgorithms.Add("aes128-ctr", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 128, CipherModeEx.CTR, key, vi));
+            _encryptionAlgorithms.Add("aes192-ctr", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 192, CipherModeEx.CTR, key, vi));
+            _encryptionAlgorithms.Add("aes256-ctr", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 256, CipherModeEx.CTR, key, vi));
+            _encryptionAlgorithms.Add("aes128-cbc", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 128, CipherModeEx.CBC, key, vi));
+            _encryptionAlgorithms.Add("3des-cbc", (key, vi) => new EncryptionAlgorithm(new TripleDESCryptoServiceProvider(), 192, CipherModeEx.CBC, key, vi));
+            _encryptionAlgorithms.Add("aes192-cbc", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 192, CipherModeEx.CBC, key, vi));
+            _encryptionAlgorithms.Add("aes256-cbc", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 256, CipherModeEx.CBC, key, vi));
+
+            _hmacAlgorithms.Add("hmac-md5", x => new HmacAlgorithm(new HMACMD5(x)));
+            _hmacAlgorithms.Add("hmac-sha1", x => new HmacAlgorithm(new HMACSHA1(x)));
+
+            _compressionAlgorithms.Add("none", () => new NoCompression());
+            _compressionAlgorithms.Add("zlib", () => new ZlibCompression());
         }
     }
 }
