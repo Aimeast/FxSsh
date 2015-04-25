@@ -48,6 +48,7 @@
     <Compile Include="Algorithms\DiffieHellmanGroupSha1.cs" />
     <Compile Include="Algorithms\DssKey.cs" />
     <Compile Include="Algorithms\EncryptionAlgorithm.cs" />
+    <Compile Include="Algorithms\HmacAlgorithm.cs" />
     <Compile Include="Algorithms\KexAlgorithm.cs" />
     <Compile Include="Algorithms\PublicKeyAlgorithm.cs" />
     <Compile Include="Algorithms\RsaKey.cs" />
