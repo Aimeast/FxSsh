@@ -43,6 +43,7 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Algorithms\CipherModeEx.cs" />
+    <Compile Include="Algorithms\CompressionAlgorithm.cs" />
     <Compile Include="Algorithms\CtrModeCryptoTransform.cs" />
     <Compile Include="Algorithms\DiffieHellman.cs" />
     <Compile Include="Algorithms\DiffieHellmanGroupSha1.cs" />
@@ -50,8 +51,10 @@
     <Compile Include="Algorithms\EncryptionAlgorithm.cs" />
     <Compile Include="Algorithms\HmacAlgorithm.cs" />
     <Compile Include="Algorithms\KexAlgorithm.cs" />
+    <Compile Include="Algorithms\NoCompression.cs" />
     <Compile Include="Algorithms\PublicKeyAlgorithm.cs" />
     <Compile Include="Algorithms\RsaKey.cs" />
+    <Compile Include="Algorithms\ZlibCompression.cs" />
     <Compile Include="DisconnectReason.cs" />
     <Compile Include="Messages\DisconnectMessage.cs" />
     <Compile Include="Messages\Message.cs" />
