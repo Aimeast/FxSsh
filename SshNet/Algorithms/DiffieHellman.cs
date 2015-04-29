@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Diagnostics.Contracts;
 using System.Globalization;
+using System.Linq;
 using System.Numerics;
 using System.Security.Cryptography;
 
@@ -44,19 +45,15 @@ namespace SshNet.Algorithms
         public byte[] CreateKeyExchange()
         {
             var y = BigInteger.ModPow(_g, _x, _p);
-            var bytes = y.ToByteArray();
-            Array.Reverse(bytes);
+            var bytes = BigintToBytes(y);
             return bytes;
         }
 
-
         public byte[] DecryptKeyExchange(byte[] keyEx)
         {
-            Array.Reverse(keyEx);
-            var pvr = new BigInteger(keyEx);
+            var pvr = BytesToBigint(keyEx);
             var z = BigInteger.ModPow(pvr, _x, _p);
-            var bytes = z.ToByteArray();
-            Array.Reverse(bytes);
+            var bytes = BigintToBytes(z);
             return bytes;
         }
 
@@ -78,6 +75,21 @@ namespace SshNet.Algorithms
         public override string ToXmlString(bool includePrivateParameters)
         {
             throw new NotImplementedException();
+        }
+
+        private BigInteger BytesToBigint(byte[] bytes)
+        {
+            return new BigInteger(bytes.Reverse().Concat(new byte[] { 0 }).ToArray());
+        }
+
+        private byte[] BigintToBytes(BigInteger bigint)
+        {
+            var bytes = bigint.ToByteArray();
+            if (bytes.Length > 1 && bytes[bytes.Length - 1] == 0)
+            {
+                return bytes.Reverse().Skip(1).ToArray();
+            }
+            return bytes.Reverse().ToArray();
         }
     }
 }

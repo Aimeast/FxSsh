@@ -14,6 +14,7 @@ namespace SshNet
         private bool _isDisposed;
         private bool _started;
         private TcpListener _listenser = null;
+        private string _hostKey = null;
 
         public SshServer()
             : this(new StartingInfo())
@@ -72,6 +73,11 @@ namespace SshNet
             }
         }
 
+        public void SetHostKey(string xml)
+        {
+            _hostKey = xml;
+        }
+
         private void AcceptSocket()
         {
             while (true)
@@ -79,12 +85,19 @@ namespace SshNet
                 try
                 {
                     var socket = _listenser.AcceptSocket();
+                    var session = new Session(socket, _hostKey);
+                    session.Disconnected += (ss, ee) => _sessions.Remove(session);
+                    _sessions.Add(session);
                     Task.Run(() =>
                     {
-                        var session = new Session(socket);
-                        session.EstablishConnection();
-                        session.Disconnected += (ss, ee) => _sessions.Remove(session);
-                        _sessions.Add(session);
+                        try
+                        {
+                            session.EstablishConnection();
+                        }
+                        catch
+                        {
+                            session.Disconnect();
+                        }
                     });
                 }
                 catch (InvalidOperationException)

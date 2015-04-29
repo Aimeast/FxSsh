@@ -7,11 +7,14 @@ namespace SshNet.Algorithms
     {
         private readonly KeyedHashAlgorithm _algorithm;
 
-        public HmacAlgorithm(KeyedHashAlgorithm algorithm)
+        public HmacAlgorithm(KeyedHashAlgorithm algorithm, int keySize, byte[] key)
         {
             Contract.Requires(algorithm != null);
+            Contract.Requires(key != null);
+            Contract.Requires(keySize == key.Length << 3);
 
             _algorithm = algorithm;
+            algorithm.Key = key;
         }
 
         public int DigestLength

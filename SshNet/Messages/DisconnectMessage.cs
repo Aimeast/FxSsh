@@ -4,9 +4,11 @@ using System.Text;
 
 namespace SshNet.Messages
 {
-    [Message("SSH_MSG_DISCONNECT", 1)]
+    [Message("SSH_MSG_DISCONNECT", MessageNumber)]
     public class DisconnectMessage : Message
     {
+        private const byte MessageNumber = 1;
+
         public DisconnectMessage(DisconnectReason reasonCode, string description = "", string language = "en")
         {
             Contract.Requires(description != null);
@@ -25,6 +27,10 @@ namespace SshNet.Messages
         {
             using (var worker = new SshDataWorker(bytes))
             {
+                var number = worker.ReadByte();
+                if (number != MessageNumber)
+                    throw new ArgumentException(string.Format("Message type {0} is not valid.", number));
+
                 ReasonCode = (DisconnectReason)worker.ReadUInt32();
                 Description = worker.ReadString(Encoding.UTF8);
                 Language = worker.ReadString(Encoding.UTF8);
@@ -35,6 +41,7 @@ namespace SshNet.Messages
         {
             using (var worker = new SshDataWorker())
             {
+                worker.Write(MessageNumber);
                 worker.Write((uint)ReasonCode);
                 worker.Write(Description, Encoding.UTF8);
                 worker.Write(Language ?? "en", Encoding.UTF8);

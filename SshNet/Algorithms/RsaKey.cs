@@ -30,8 +30,8 @@ namespace SshNet.Algorithms
                     throw new CryptographicException("Key and certificates were not created with this algorithm.");
 
                 var args = new RSAParameters();
-                args.Exponent = worker.ReadBinary();
-                args.Modulus = worker.ReadBinary();
+                args.Exponent = worker.ReadMpint();
+                args.Modulus = worker.ReadMpint();
 
                 _algorithm.ImportParameters(args);
             }
@@ -44,8 +44,8 @@ namespace SshNet.Algorithms
                 var args = _algorithm.ExportParameters(false);
 
                 worker.Write(this.Name, Encoding.UTF8);
-                worker.WriteBinary(args.Exponent);
-                worker.WriteBinary(args.Modulus);
+                worker.WriteMpint(args.Exponent);
+                worker.WriteMpint(args.Modulus);
 
                 return worker.ToArray();
             }

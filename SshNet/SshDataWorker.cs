@@ -24,6 +24,11 @@ namespace SshNet
             _ms.WriteByte(value ? (byte)1 : (byte)0);
         }
 
+        public void Write(byte value)
+        {
+            _ms.WriteByte(value);
+        }
+
         public void Write(uint value)
         {
             var bytes = new[] { (byte)(value >> 24), (byte)(value >> 16), (byte)(value >> 8), (byte)(value & 0xFF) };
@@ -46,6 +51,30 @@ namespace SshNet
 
             var bytes = encoding.GetBytes(str);
             WriteBinary(bytes);
+        }
+
+        public void WriteMpint(byte[] data)
+        {
+            if (data.Length == 1 && data[0] == 0)
+            {
+                Write(new byte[4]);
+            }
+            else
+            {
+                var length = (uint)data.Length;
+                var high = ((data[0] & 0x80) != 0);
+                if (high)
+                {
+                    Write(length + 1);
+                    Write((byte)0);
+                    Write(data);
+                }
+                else
+                {
+                    Write(length);
+                    Write(data);
+                }
+            }
         }
 
         public void Write(byte[] data)
@@ -80,6 +109,12 @@ namespace SshNet
             return num != 0;
         }
 
+        public byte ReadByte()
+        {
+            var data = ReadBinary(1);
+            return data[0];
+        }
+
         public uint ReadUInt32()
         {
             var data = ReadBinary(4);
@@ -99,6 +134,23 @@ namespace SshNet
 
             var bytes = ReadBinary();
             return encoding.GetString(bytes);
+        }
+
+        public byte[] ReadMpint()
+        {
+            var data = ReadBinary();
+
+            if (data.Length == 0)
+                return new byte[1];
+
+            if (data[0] == 0)
+            {
+                var output = new byte[data.Length - 1];
+                Array.Copy(data, 1, output, 0, output.Length);
+                return output;
+            }
+
+            return data;
         }
 
         public byte[] ReadBinary(int length)

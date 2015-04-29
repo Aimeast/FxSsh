@@ -21,31 +21,72 @@ namespace SshNet
         private const int InitialLocalWindowSize = LocalChannelDataPacketSize * 32;
         private const int LocalChannelDataPacketSize = 1024 * 64;
 
+        private static readonly RandomNumberGenerator _rng = new RNGCryptoServiceProvider();
+        private static readonly Dictionary<byte, Type> _messagesMetadata;
+        private static readonly Dictionary<string, Func<KexAlgorithm>> _keyExchangeAlgorithms =
+            new Dictionary<string, Func<KexAlgorithm>>();
+        private static readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms =
+            new Dictionary<string, Func<string, PublicKeyAlgorithm>>();
+        private static readonly Dictionary<string, CipherInfo> _encryptionAlgorithms =
+            new Dictionary<string, CipherInfo>();
+        private static readonly Dictionary<string, HmacInfo> _hmacAlgorithms =
+            new Dictionary<string, HmacInfo>();
+        private static readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms =
+            new Dictionary<string, Func<CompressionAlgorithm>>();
+
         private readonly Socket _socket;
 #if DEBUG
         private readonly TimeSpan _timeout = TimeSpan.FromDays(1);
 #else
         private readonly TimeSpan _timeout = TimeSpan.FromSeconds(30);
 #endif
-        private readonly Dictionary<string, Func<AsymmetricAlgorithm, KexAlgorithm>> _keyExchangeAlgorithms =
-            new Dictionary<string, Func<AsymmetricAlgorithm, KexAlgorithm>>();
-        private readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms =
-            new Dictionary<string, Func<string, PublicKeyAlgorithm>>();
-        private readonly Dictionary<string, Func<byte[], byte[], EncryptionAlgorithm>> _encryptionAlgorithms =
-            new Dictionary<string, Func<byte[], byte[], EncryptionAlgorithm>>();
-        private readonly Dictionary<string, Func<byte[], HmacAlgorithm>> _hmacAlgorithms =
-            new Dictionary<string, Func<byte[], HmacAlgorithm>>();
-        private readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms =
-            new Dictionary<string, Func<CompressionAlgorithm>>();
+        private readonly string _hostKey;
+
+        private uint _outboundPacketSequence;
+        private uint _inboundPacketSequence;
+        private Algorithms _algorithms = null;
+        private ExchangeContext _exchangeContext = new ExchangeContext();
 
         public string ServerVersion { get; private set; }
         public string ClientVersion { get; private set; }
+        public byte[] SessionId { get; private set; }
 
-        public Session(Socket socket)
+        static Session()
+        {
+            _keyExchangeAlgorithms.Add("diffie-hellman-group14-sha1", () => new DiffieHellmanGroupSha1(new DiffieHellman(2048)));
+            _keyExchangeAlgorithms.Add("diffie-hellman-group1-sha1", () => new DiffieHellmanGroupSha1(new DiffieHellman(1024)));
+
+            _publicKeyAlgorithms.Add("ssh-rsa", x => new RsaKey(x));
+            _publicKeyAlgorithms.Add("ssh-dss", x => new DssKey(x));
+
+            _encryptionAlgorithms.Add("aes128-ctr", new CipherInfo(new AesCryptoServiceProvider(), 128, CipherModeEx.CTR));
+            _encryptionAlgorithms.Add("aes192-ctr", new CipherInfo(new AesCryptoServiceProvider(), 192, CipherModeEx.CTR));
+            _encryptionAlgorithms.Add("aes256-ctr", new CipherInfo(new AesCryptoServiceProvider(), 256, CipherModeEx.CTR));
+            _encryptionAlgorithms.Add("aes128-cbc", new CipherInfo(new AesCryptoServiceProvider(), 128, CipherModeEx.CBC));
+            _encryptionAlgorithms.Add("3des-cbc", new CipherInfo(new TripleDESCryptoServiceProvider(), 192, CipherModeEx.CBC));
+            _encryptionAlgorithms.Add("aes192-cbc", new CipherInfo(new AesCryptoServiceProvider(), 192, CipherModeEx.CBC));
+            _encryptionAlgorithms.Add("aes256-cbc", new CipherInfo(new AesCryptoServiceProvider(), 256, CipherModeEx.CBC));
+
+            _hmacAlgorithms.Add("hmac-md5", new HmacInfo(new HMACMD5(), 128));
+            _hmacAlgorithms.Add("hmac-sha1", new HmacInfo(new HMACSHA1(), 160));
+
+            _compressionAlgorithms.Add("none", () => new NoCompression());
+            _compressionAlgorithms.Add("zlib", () => new ZlibCompression());
+
+            _messagesMetadata = (from t in typeof(Message).Assembly.GetTypes()
+                                 let attrib = (MessageAttribute)t.GetCustomAttributes(typeof(MessageAttribute), false).FirstOrDefault()
+                                 where attrib != null
+                                 select new { attrib.Number, Type = t })
+                                 .ToDictionary(x => x.Number, x => x.Type);
+        }
+
+        public Session(Socket socket, string hostKey)
         {
             Contract.Requires(socket != null);
+            Contract.Requires(hostKey != null);
 
             _socket = socket;
+            _hostKey = hostKey;
             ServerVersion = "SSH-2.0-SshNet";
         }
 
@@ -70,7 +111,14 @@ namespace SshNet
                     string.Format("Not supported for client SSH version {0}. This server only supports SSH v2.0.", clientIdVersions));
             }
 
-            RegisterAlgorithms();
+            var kexInitMessage = LoadKexInitMessage();
+            SendMessage(kexInitMessage);
+
+            while (_socket != null && _socket.Connected)
+            {
+                var message = ReceiveMessage();
+                HandleMessageCore(message);
+            }
         }
 
         public void Disconnect()
@@ -86,13 +134,18 @@ namespace SshNet
                 TrySendMessage(message);
             }
 
-            _socket.Disconnect(true);
-            _socket.Dispose();
+            try
+            {
+                _socket.Disconnect(true);
+                _socket.Dispose();
+            }
+            catch { }
 
             if (Disconnected != null)
                 Disconnected(this, EventArgs.Empty);
         }
 
+        #region Socket operations
         private void SetSocketOptions()
         {
             const int socketBufferSize = 2 * MaximumSshPacketSize;
@@ -213,15 +266,63 @@ namespace SshNet
                 }
             } while (totalBytesSent < totalBytesToSend);
         }
+        #endregion
 
         private Message ReceiveMessage()
         {
-            throw new NotImplementedException();
+            var firstBlock = SocketRead(5);
+            var packetLength = (uint)(firstBlock[0] << 24 | firstBlock[1] << 16 | firstBlock[2] << 8 | firstBlock[3]);
+            var paddingLength = firstBlock[4];
+            var bytesToRead = (int)(packetLength - 1);
+
+            var bytes = SocketRead(bytesToRead);
+            var data = bytes.Take(bytesToRead - paddingLength).ToArray();
+
+            _inboundPacketSequence++;
+
+            var typeNumber = data[0];
+            if (!_messagesMetadata.ContainsKey(typeNumber))
+                throw new NotSupportedException(string.Format("Message type {0} is not valid.", typeNumber));
+
+            var message = (Message)Activator.CreateInstance(_messagesMetadata[typeNumber]);
+            message.Load(data);
+
+            return message;
         }
 
         private void SendMessage(Message message)
         {
-            throw new NotImplementedException();
+            var payload = message.GetPacket();
+
+            var blockSize = (byte)8; // max(8, encryption.blocksize)
+
+            // http://tools.ietf.org/html/rfc4253
+            // 6.  Binary Packet Protocol
+            // the total length of (packet_length || padding_length || payload || padding)
+            // is a multiple of the cipher block size or 8,
+            // padding length must between 4 and 255 bytes.
+            var paddingLength = (byte)(blockSize - (payload.Length + 5) % blockSize);
+            if (paddingLength < 4)
+                paddingLength += blockSize;
+
+            var packetLength = (uint)payload.Length + paddingLength + 1;
+
+            var bytes = new byte[paddingLength];
+            _rng.GetBytes(bytes);
+
+            using (var worker = new SshDataWorker())
+            {
+                worker.Write(packetLength);
+                worker.Write(paddingLength);
+                worker.Write(payload);
+                worker.Write(bytes);
+
+                bytes = worker.ToArray();
+            }
+
+            SocketWrite(bytes);
+
+            _outboundPacketSequence++;
         }
 
         private bool TrySendMessage(Message message)
@@ -237,27 +338,195 @@ namespace SshNet
             }
         }
 
-        private void RegisterAlgorithms()
+        private Message LoadKexInitMessage()
         {
-            _keyExchangeAlgorithms.Add("diffie-hellman-group14-sha1", x => new DiffieHellmanGroupSha1(new DiffieHellman(2048)));
-            _keyExchangeAlgorithms.Add("diffie-hellman-group1-sha1", x => new DiffieHellmanGroupSha1(new DiffieHellman(1024)));
+            var message = new KeyExchangeInitMessage();
+            message.KeyExchangeAlgorithms = _keyExchangeAlgorithms.Keys.ToArray();
+            message.ServerHostKeyAlgorithms = _publicKeyAlgorithms.Keys.ToArray();
+            message.EncryptionAlgorithmsClientToServer = _encryptionAlgorithms.Keys.ToArray();
+            message.EncryptionAlgorithmsServerToClient = _encryptionAlgorithms.Keys.ToArray();
+            message.MacAlgorithmsClientToServer = _hmacAlgorithms.Keys.ToArray();
+            message.MacAlgorithmsServerToClient = _hmacAlgorithms.Keys.ToArray();
+            message.CompressionAlgorithmsClientToServer = _compressionAlgorithms.Keys.ToArray();
+            message.CompressionAlgorithmsServerToClient = _compressionAlgorithms.Keys.ToArray();
+            message.LanguagesClientToServer = new[] { "" };
+            message.LanguagesServerToClient = new[] { "" };
+            message.FirstKexPacketFollows = false;
+            message.Reserved = 0;
 
-            _publicKeyAlgorithms.Add("ssh-rsa", x => new RsaKey(x));
-            _publicKeyAlgorithms.Add("ssh-dss", x => new DssKey(x));
+            _exchangeContext.ServerKexInitPayload = message.GetPacket();
 
-            _encryptionAlgorithms.Add("aes128-ctr", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 128, CipherModeEx.CTR, key, vi));
-            _encryptionAlgorithms.Add("aes192-ctr", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 192, CipherModeEx.CTR, key, vi));
-            _encryptionAlgorithms.Add("aes256-ctr", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 256, CipherModeEx.CTR, key, vi));
-            _encryptionAlgorithms.Add("aes128-cbc", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 128, CipherModeEx.CBC, key, vi));
-            _encryptionAlgorithms.Add("3des-cbc", (key, vi) => new EncryptionAlgorithm(new TripleDESCryptoServiceProvider(), 192, CipherModeEx.CBC, key, vi));
-            _encryptionAlgorithms.Add("aes192-cbc", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 192, CipherModeEx.CBC, key, vi));
-            _encryptionAlgorithms.Add("aes256-cbc", (key, vi) => new EncryptionAlgorithm(new AesCryptoServiceProvider(), 256, CipherModeEx.CBC, key, vi));
+            return message;
+        }
 
-            _hmacAlgorithms.Add("hmac-md5", x => new HmacAlgorithm(new HMACMD5(x)));
-            _hmacAlgorithms.Add("hmac-sha1", x => new HmacAlgorithm(new HMACSHA1(x)));
+        #region Handle messages
+        private void HandleMessageCore(Message message)
+        {
+            HandleMessage((dynamic)message);
+        }
 
-            _compressionAlgorithms.Add("none", () => new NoCompression());
-            _compressionAlgorithms.Add("zlib", () => new ZlibCompression());
+        private void HandleMessage(KeyExchangeInitMessage message)
+        {
+            _exchangeContext.KeyExchange = ChooseAlgorithm(_keyExchangeAlgorithms.Keys.ToArray(), message.KeyExchangeAlgorithms);
+            _exchangeContext.PublicKey = ChooseAlgorithm(_publicKeyAlgorithms.Keys.ToArray(), message.ServerHostKeyAlgorithms);
+            _exchangeContext.ClientEncryption = ChooseAlgorithm(_encryptionAlgorithms.Keys.ToArray(), message.EncryptionAlgorithmsClientToServer);
+            _exchangeContext.ServerEncryption = ChooseAlgorithm(_encryptionAlgorithms.Keys.ToArray(), message.EncryptionAlgorithmsServerToClient);
+            _exchangeContext.ClientHmac = ChooseAlgorithm(_hmacAlgorithms.Keys.ToArray(), message.MacAlgorithmsClientToServer);
+            _exchangeContext.ServerHmac = ChooseAlgorithm(_hmacAlgorithms.Keys.ToArray(), message.MacAlgorithmsServerToClient);
+            _exchangeContext.ClientCompression = ChooseAlgorithm(_compressionAlgorithms.Keys.ToArray(), message.CompressionAlgorithmsClientToServer);
+            _exchangeContext.ServerCompression = ChooseAlgorithm(_compressionAlgorithms.Keys.ToArray(), message.CompressionAlgorithmsServerToClient);
+
+            _exchangeContext.ClientKexInitPayload = message.GetPacket();
+        }
+
+        private void HandleMessage(KeyExchangeDhInitMessage message)
+        {
+            var kexAlg = _keyExchangeAlgorithms[_exchangeContext.KeyExchange]();
+            var hostKeyAlg = _publicKeyAlgorithms[_exchangeContext.PublicKey](_hostKey);
+            var clientCipher = _encryptionAlgorithms[_exchangeContext.ClientEncryption];
+            var serverCipher = _encryptionAlgorithms[_exchangeContext.ServerEncryption];
+            var serverHmac = _hmacAlgorithms[_exchangeContext.ServerHmac];
+            var clientHmac = _hmacAlgorithms[_exchangeContext.ClientHmac];
+
+            var clientExchangeValue = message.E;
+            var serverExchangeValue = kexAlg.CreateKeyExchange();
+            var sharedSecret = kexAlg.DecryptKeyExchange(clientExchangeValue);
+            var hostKeyAndCerts = hostKeyAlg.CreateKeyAndCertificatesData();
+            var exchangeHash = ComputeExchangeHash(kexAlg, hostKeyAndCerts, clientExchangeValue, serverExchangeValue, sharedSecret);
+
+            if (SessionId == null)
+                SessionId = exchangeHash;
+
+            var clientCipherVI = ComputeEncryptionKey(kexAlg, exchangeHash, clientCipher.KeySize / 8, sharedSecret, 'A');
+            var serverCipherVI = ComputeEncryptionKey(kexAlg, exchangeHash, serverCipher.KeySize / 8, sharedSecret, 'B');
+            var clientCipherKey = ComputeEncryptionKey(kexAlg, exchangeHash, clientCipher.KeySize / 8, sharedSecret, 'C');
+            var serverCipherKey = ComputeEncryptionKey(kexAlg, exchangeHash, serverCipher.KeySize / 8, sharedSecret, 'D');
+            var clientHmacKey = ComputeEncryptionKey(kexAlg, exchangeHash, clientHmac.KeySize / 8, sharedSecret, 'E');
+            var serverHmacKey = ComputeEncryptionKey(kexAlg, exchangeHash, serverHmac.KeySize / 8, sharedSecret, 'F');
+
+            _exchangeContext.NewAlgorithms = new Algorithms
+            {
+                KeyExchange = kexAlg,
+                PublicKey = hostKeyAlg,
+                ClientEncryption = clientCipher.Cipher(clientCipherKey, clientCipherVI),
+                ServerEncryption = serverCipher.Cipher(serverCipherKey, serverCipherVI),
+                ClientHmac = clientHmac.Hmac(clientHmacKey),
+                ServerHmac = serverHmac.Hmac(serverHmacKey),
+                ClientCompression = _compressionAlgorithms[_exchangeContext.ClientCompression](),
+                ServerCompression = _compressionAlgorithms[_exchangeContext.ServerCompression](),
+            };
+
+            var reply = new KeyExchangeDhReplyMessage
+            {
+                HostKey = hostKeyAndCerts,
+                F = serverExchangeValue,
+                Signature = hostKeyAlg.CreateSignatureData(exchangeHash),
+            };
+
+            SendMessage(reply);
+            SendMessage(new NewKeysMessage());
+        }
+
+        private void HandleMessage(NewKeysMessage message)
+        {
+            _algorithms = _exchangeContext.NewAlgorithms;
+            _exchangeContext = null;
+        }
+        #endregion
+
+        private string ChooseAlgorithm(string[] serverAlgorithms, string[] clientAlgorithms)
+        {
+            Contract.Requires(serverAlgorithms != null);
+            Contract.Requires(clientAlgorithms != null);
+
+            foreach (var client in clientAlgorithms)
+                foreach (var server in serverAlgorithms)
+                    if (client == server)
+                        return client;
+
+            throw new ArgumentOutOfRangeException("Failed to negotiate algorithm.");
+        }
+
+        private byte[] ComputeExchangeHash(KexAlgorithm kexAlg, byte[] hostKeyAndCerts, byte[] clientExchangeValue, byte[] serverExchangeValue, byte[] sharedSecret)
+        {
+            using (var worker = new SshDataWorker())
+            {
+                worker.Write(ClientVersion, Encoding.ASCII);
+                worker.Write(ServerVersion, Encoding.ASCII);
+                worker.WriteBinary(_exchangeContext.ClientKexInitPayload);
+                worker.WriteBinary(_exchangeContext.ServerKexInitPayload);
+                worker.WriteBinary(hostKeyAndCerts);
+                worker.WriteMpint(clientExchangeValue);
+                worker.WriteMpint(serverExchangeValue);
+                worker.WriteMpint(sharedSecret);
+
+                return kexAlg.ComputeHash(worker.ToArray());
+            }
+        }
+
+        private byte[] ComputeEncryptionKey(KexAlgorithm kexAlg, byte[] exchangeHash, int blockSize, byte[] sharedSecret, char letter)
+        {
+            var keyBuffer = new byte[blockSize];
+            var keyBufferIndex = 0;
+            var currentHashLength = 0;
+            byte[] currentHash = null;
+
+            while (keyBufferIndex < blockSize)
+            {
+                using (var worker = new SshDataWorker())
+                {
+                    worker.WriteBinary(sharedSecret);
+                    worker.Write(exchangeHash);
+
+                    if (currentHash == null)
+                    {
+                        worker.Write((byte)letter);
+                        worker.Write(SessionId);
+                    }
+                    else
+                    {
+                        worker.Write(currentHash);
+                    }
+
+                    currentHash = kexAlg.ComputeHash(worker.ToArray());
+                }
+
+                currentHashLength = Math.Min(currentHash.Length, blockSize - keyBufferIndex);
+                Array.Copy(currentHash, 0, keyBuffer, keyBufferIndex, currentHashLength);
+
+                keyBufferIndex += currentHashLength;
+            }
+
+            return keyBuffer;
+        }
+
+        private class Algorithms
+        {
+            public KexAlgorithm KeyExchange;
+            public PublicKeyAlgorithm PublicKey;
+            public EncryptionAlgorithm ClientEncryption;
+            public EncryptionAlgorithm ServerEncryption;
+            public HmacAlgorithm ClientHmac;
+            public HmacAlgorithm ServerHmac;
+            public CompressionAlgorithm ClientCompression;
+            public CompressionAlgorithm ServerCompression;
+        }
+
+        private class ExchangeContext
+        {
+            public string KeyExchange;
+            public string PublicKey;
+            public string ClientEncryption;
+            public string ServerEncryption;
+            public string ClientHmac;
+            public string ServerHmac;
+            public string ClientCompression;
+            public string ServerCompression;
+
+            public byte[] ClientKexInitPayload;
+            public byte[] ServerKexInitPayload;
+
+            public Algorithms NewAlgorithms;
         }
     }
 }

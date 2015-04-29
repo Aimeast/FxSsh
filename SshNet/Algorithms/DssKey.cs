@@ -30,10 +30,10 @@ namespace SshNet.Algorithms
                     throw new CryptographicException("Key and certificates were not created with this algorithm.");
 
                 var args = new DSAParameters();
-                args.P = worker.ReadBinary();
-                args.Q = worker.ReadBinary();
-                args.G = worker.ReadBinary();
-                args.Y = worker.ReadBinary();
+                args.P = worker.ReadMpint();
+                args.Q = worker.ReadMpint();
+                args.G = worker.ReadMpint();
+                args.Y = worker.ReadMpint();
 
                 _algorithm.ImportParameters(args);
             }
@@ -46,10 +46,10 @@ namespace SshNet.Algorithms
                 var args = _algorithm.ExportParameters(false);
 
                 worker.Write(this.Name, Encoding.UTF8);
-                worker.WriteBinary(args.P);
-                worker.WriteBinary(args.Q);
-                worker.WriteBinary(args.G);
-                worker.WriteBinary(args.Y);
+                worker.WriteMpint(args.P);
+                worker.WriteMpint(args.Q);
+                worker.WriteMpint(args.G);
+                worker.WriteMpint(args.Y);
 
                 return worker.ToArray();
             }
