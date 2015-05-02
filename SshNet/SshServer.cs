@@ -94,6 +94,10 @@ namespace SshNet
                         {
                             session.EstablishConnection();
                         }
+                        catch (SshConnectionException ex)
+                        {
+                            session.Disconnect(ex.DisconnectReason, ex.Message);
+                        }
                         catch
                         {
                             session.Disconnect();

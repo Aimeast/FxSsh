@@ -27,10 +27,10 @@ namespace SshNet
             new Dictionary<string, Func<KexAlgorithm>>();
         private static readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms =
             new Dictionary<string, Func<string, PublicKeyAlgorithm>>();
-        private static readonly Dictionary<string, CipherInfo> _encryptionAlgorithms =
-            new Dictionary<string, CipherInfo>();
-        private static readonly Dictionary<string, HmacInfo> _hmacAlgorithms =
-            new Dictionary<string, HmacInfo>();
+        private static readonly Dictionary<string, Func<CipherInfo>> _encryptionAlgorithms =
+            new Dictionary<string, Func<CipherInfo>>();
+        private static readonly Dictionary<string, Func<HmacInfo>> _hmacAlgorithms =
+            new Dictionary<string, Func<HmacInfo>>();
         private static readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms =
             new Dictionary<string, Func<CompressionAlgorithm>>();
 
@@ -59,16 +59,16 @@ namespace SshNet
             _publicKeyAlgorithms.Add("ssh-rsa", x => new RsaKey(x));
             _publicKeyAlgorithms.Add("ssh-dss", x => new DssKey(x));
 
-            _encryptionAlgorithms.Add("aes128-ctr", new CipherInfo(new AesCryptoServiceProvider(), 128, CipherModeEx.CTR));
-            _encryptionAlgorithms.Add("aes192-ctr", new CipherInfo(new AesCryptoServiceProvider(), 192, CipherModeEx.CTR));
-            _encryptionAlgorithms.Add("aes256-ctr", new CipherInfo(new AesCryptoServiceProvider(), 256, CipherModeEx.CTR));
-            _encryptionAlgorithms.Add("aes128-cbc", new CipherInfo(new AesCryptoServiceProvider(), 128, CipherModeEx.CBC));
-            _encryptionAlgorithms.Add("3des-cbc", new CipherInfo(new TripleDESCryptoServiceProvider(), 192, CipherModeEx.CBC));
-            _encryptionAlgorithms.Add("aes192-cbc", new CipherInfo(new AesCryptoServiceProvider(), 192, CipherModeEx.CBC));
-            _encryptionAlgorithms.Add("aes256-cbc", new CipherInfo(new AesCryptoServiceProvider(), 256, CipherModeEx.CBC));
+            _encryptionAlgorithms.Add("aes128-ctr", () => new CipherInfo(new AesCryptoServiceProvider(), 128, CipherModeEx.CTR));
+            _encryptionAlgorithms.Add("aes192-ctr", () => new CipherInfo(new AesCryptoServiceProvider(), 192, CipherModeEx.CTR));
+            _encryptionAlgorithms.Add("aes256-ctr", () => new CipherInfo(new AesCryptoServiceProvider(), 256, CipherModeEx.CTR));
+            _encryptionAlgorithms.Add("aes128-cbc", () => new CipherInfo(new AesCryptoServiceProvider(), 128, CipherModeEx.CBC));
+            _encryptionAlgorithms.Add("3des-cbc", () => new CipherInfo(new TripleDESCryptoServiceProvider(), 192, CipherModeEx.CBC));
+            _encryptionAlgorithms.Add("aes192-cbc", () => new CipherInfo(new AesCryptoServiceProvider(), 192, CipherModeEx.CBC));
+            _encryptionAlgorithms.Add("aes256-cbc", () => new CipherInfo(new AesCryptoServiceProvider(), 256, CipherModeEx.CBC));
 
-            _hmacAlgorithms.Add("hmac-md5", new HmacInfo(new HMACMD5(), 128));
-            _hmacAlgorithms.Add("hmac-sha1", new HmacInfo(new HMACSHA1(), 160));
+            _hmacAlgorithms.Add("hmac-md5", () => new HmacInfo(new HMACMD5(), 128));
+            _hmacAlgorithms.Add("hmac-sha1", () => new HmacInfo(new HMACSHA1(), 160));
 
             _compressionAlgorithms.Add("none", () => new NoCompression());
             _compressionAlgorithms.Add("zlib", () => new ZlibCompression());
@@ -106,9 +106,9 @@ namespace SshNet
             var clientIdVersions = ClientVersion.Split('-')[1];
             if (clientIdVersions != "2.0")
             {
-                Disconnect(DisconnectReason.ProtocolVersionNotSupported, "This server only supports SSH v2.0.");
-                throw new NotSupportedException(
-                    string.Format("Not supported for client SSH version {0}. This server only supports SSH v2.0.", clientIdVersions));
+                throw new SshConnectionException(
+                    string.Format("Not supported for client SSH version {0}. This server only supports SSH v2.0.", clientIdVersions),
+                    DisconnectReason.ProtocolVersionNotSupported);
             }
 
             var kexInitMessage = LoadKexInitMessage();
@@ -270,15 +270,34 @@ namespace SshNet
 
         private Message ReceiveMessage()
         {
-            var firstBlock = SocketRead(5);
-            var packetLength = (uint)(firstBlock[0] << 24 | firstBlock[1] << 16 | firstBlock[2] << 8 | firstBlock[3]);
+            var useAlg = _algorithms != null;
+
+            var blockSize = (byte)(useAlg ? Math.Max(8, _algorithms.ClientEncryption.BlockBytesSize) : 8);
+            var firstBlock = SocketRead(blockSize);
+            if (useAlg)
+                firstBlock = _algorithms.ClientEncryption.Transform(firstBlock);
+
+            var packetLength = firstBlock[0] << 24 | firstBlock[1] << 16 | firstBlock[2] << 8 | firstBlock[3];
             var paddingLength = firstBlock[4];
-            var bytesToRead = (int)(packetLength - 1);
+            var bytesToRead = packetLength - blockSize + 4;
 
-            var bytes = SocketRead(bytesToRead);
-            var data = bytes.Take(bytesToRead - paddingLength).ToArray();
+            var followingBlocks = SocketRead(bytesToRead);
+            if (useAlg)
+                followingBlocks = _algorithms.ClientEncryption.Transform(followingBlocks);
 
-            _inboundPacketSequence++;
+            var fullPacket = firstBlock.Concat(followingBlocks).ToArray();
+            var data = fullPacket.Skip(5).Take(packetLength - paddingLength).ToArray();
+            if (useAlg)
+            {
+                var clientMac = SocketRead(_algorithms.ClientHmac.DigestLength);
+                var mac = ComputeHmac(_algorithms.ClientHmac, fullPacket, _inboundPacketSequence);
+                if (!clientMac.SequenceEqual(mac))
+                {
+                    throw new SshConnectionException("Invalid MAC", DisconnectReason.MacError);
+                }
+
+                data = _algorithms.ClientCompression.Decompress(data);
+            }
 
             var typeNumber = data[0];
             if (!_messagesMetadata.ContainsKey(typeNumber))
@@ -287,14 +306,19 @@ namespace SshNet
             var message = (Message)Activator.CreateInstance(_messagesMetadata[typeNumber]);
             message.Load(data);
 
+            _inboundPacketSequence++;
+
             return message;
         }
 
         private void SendMessage(Message message)
         {
-            var payload = message.GetPacket();
+            var useAlg = _algorithms != null;
 
-            var blockSize = (byte)8; // max(8, encryption.blocksize)
+            var blockSize = (byte)(useAlg ? Math.Max(8, _algorithms.ServerEncryption.BlockBytesSize) : 8);
+            var payload = message.GetPacket();
+            if (useAlg)
+                payload = _algorithms.ServerCompression.Compress(payload);
 
             // http://tools.ietf.org/html/rfc4253
             // 6.  Binary Packet Protocol
@@ -307,20 +331,26 @@ namespace SshNet
 
             var packetLength = (uint)payload.Length + paddingLength + 1;
 
-            var bytes = new byte[paddingLength];
-            _rng.GetBytes(bytes);
+            var padding = new byte[paddingLength];
+            _rng.GetBytes(padding);
 
             using (var worker = new SshDataWorker())
             {
                 worker.Write(packetLength);
                 worker.Write(paddingLength);
                 worker.Write(payload);
-                worker.Write(bytes);
+                worker.Write(padding);
 
-                bytes = worker.ToArray();
+                payload = worker.ToArray();
             }
 
-            SocketWrite(bytes);
+            if (useAlg)
+            {
+                var mac = ComputeHmac(_algorithms.ServerHmac, payload, _outboundPacketSequence);
+                payload = _algorithms.ServerEncryption.Transform(payload).Concat(mac).ToArray();
+            }
+
+            SocketWrite(payload);
 
             _outboundPacketSequence++;
         }
@@ -383,10 +413,10 @@ namespace SshNet
         {
             var kexAlg = _keyExchangeAlgorithms[_exchangeContext.KeyExchange]();
             var hostKeyAlg = _publicKeyAlgorithms[_exchangeContext.PublicKey](_hostKey);
-            var clientCipher = _encryptionAlgorithms[_exchangeContext.ClientEncryption];
-            var serverCipher = _encryptionAlgorithms[_exchangeContext.ServerEncryption];
-            var serverHmac = _hmacAlgorithms[_exchangeContext.ServerHmac];
-            var clientHmac = _hmacAlgorithms[_exchangeContext.ClientHmac];
+            var clientCipher = _encryptionAlgorithms[_exchangeContext.ClientEncryption]();
+            var serverCipher = _encryptionAlgorithms[_exchangeContext.ServerEncryption]();
+            var serverHmac = _hmacAlgorithms[_exchangeContext.ServerHmac]();
+            var clientHmac = _hmacAlgorithms[_exchangeContext.ClientHmac]();
 
             var clientExchangeValue = message.E;
             var serverExchangeValue = kexAlg.CreateKeyExchange();
@@ -397,19 +427,19 @@ namespace SshNet
             if (SessionId == null)
                 SessionId = exchangeHash;
 
-            var clientCipherVI = ComputeEncryptionKey(kexAlg, exchangeHash, clientCipher.KeySize / 8, sharedSecret, 'A');
-            var serverCipherVI = ComputeEncryptionKey(kexAlg, exchangeHash, serverCipher.KeySize / 8, sharedSecret, 'B');
-            var clientCipherKey = ComputeEncryptionKey(kexAlg, exchangeHash, clientCipher.KeySize / 8, sharedSecret, 'C');
-            var serverCipherKey = ComputeEncryptionKey(kexAlg, exchangeHash, serverCipher.KeySize / 8, sharedSecret, 'D');
-            var clientHmacKey = ComputeEncryptionKey(kexAlg, exchangeHash, clientHmac.KeySize / 8, sharedSecret, 'E');
-            var serverHmacKey = ComputeEncryptionKey(kexAlg, exchangeHash, serverHmac.KeySize / 8, sharedSecret, 'F');
+            var clientCipherIV = ComputeEncryptionKey(kexAlg, exchangeHash, clientCipher.BlockSize >> 3, sharedSecret, 'A');
+            var serverCipherIV = ComputeEncryptionKey(kexAlg, exchangeHash, serverCipher.BlockSize >> 3, sharedSecret, 'B');
+            var clientCipherKey = ComputeEncryptionKey(kexAlg, exchangeHash, clientCipher.KeySize >> 3, sharedSecret, 'C');
+            var serverCipherKey = ComputeEncryptionKey(kexAlg, exchangeHash, serverCipher.KeySize >> 3, sharedSecret, 'D');
+            var clientHmacKey = ComputeEncryptionKey(kexAlg, exchangeHash, clientHmac.KeySize >> 3, sharedSecret, 'E');
+            var serverHmacKey = ComputeEncryptionKey(kexAlg, exchangeHash, serverHmac.KeySize >> 3, sharedSecret, 'F');
 
             _exchangeContext.NewAlgorithms = new Algorithms
             {
                 KeyExchange = kexAlg,
                 PublicKey = hostKeyAlg,
-                ClientEncryption = clientCipher.Cipher(clientCipherKey, clientCipherVI),
-                ServerEncryption = serverCipher.Cipher(serverCipherKey, serverCipherVI),
+                ClientEncryption = clientCipher.Cipher(clientCipherKey, clientCipherIV, false),
+                ServerEncryption = serverCipher.Cipher(serverCipherKey, serverCipherIV, true),
                 ClientHmac = clientHmac.Hmac(clientHmacKey),
                 ServerHmac = serverHmac.Hmac(serverHmacKey),
                 ClientCompression = _compressionAlgorithms[_exchangeContext.ClientCompression](),
@@ -444,7 +474,7 @@ namespace SshNet
                     if (client == server)
                         return client;
 
-            throw new ArgumentOutOfRangeException("Failed to negotiate algorithm.");
+            throw new SshConnectionException("Failed to negotiate algorithm.", DisconnectReason.KeyExchangeFailed);
         }
 
         private byte[] ComputeExchangeHash(KexAlgorithm kexAlg, byte[] hostKeyAndCerts, byte[] clientExchangeValue, byte[] serverExchangeValue, byte[] sharedSecret)
@@ -475,7 +505,7 @@ namespace SshNet
             {
                 using (var worker = new SshDataWorker())
                 {
-                    worker.WriteBinary(sharedSecret);
+                    worker.WriteMpint(sharedSecret);
                     worker.Write(exchangeHash);
 
                     if (currentHash == null)
@@ -498,6 +528,17 @@ namespace SshNet
             }
 
             return keyBuffer;
+        }
+
+        private byte[] ComputeHmac(HmacAlgorithm alg, byte[] payload, uint seq)
+        {
+            using (var worker = new SshDataWorker())
+            {
+                worker.Write(seq);
+                worker.Write(payload);
+
+                return alg.ComputeHash(worker.ToArray());
+            }
         }
 
         private class Algorithms

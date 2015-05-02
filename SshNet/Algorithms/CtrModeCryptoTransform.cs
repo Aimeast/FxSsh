@@ -1,4 +1,5 @@
-﻿using System.Security.Cryptography;
+﻿using System.Diagnostics.Contracts;
+using System.Security.Cryptography;
 
 namespace SshNet.Algorithms
 {
@@ -6,18 +7,21 @@ namespace SshNet.Algorithms
     {
         private readonly SymmetricAlgorithm _algorithm;
         private readonly ICryptoTransform _transform;
-        private readonly byte[] _counter;
+        private readonly byte[] _iv;
+        private readonly byte[] _block;
 
 
-        public CtrModeCryptoTransform(SymmetricAlgorithm algorithm, bool encryptor)
+        public CtrModeCryptoTransform(SymmetricAlgorithm algorithm)
         {
+            Contract.Requires(algorithm != null);
+
             algorithm.Mode = CipherMode.ECB;
+            algorithm.Padding = PaddingMode.None;
 
             _algorithm = algorithm;
-            _transform = encryptor
-                ? algorithm.CreateEncryptor()
-                : algorithm.CreateDecryptor();
-            _counter = new byte[algorithm.IV.Length];
+            _transform = algorithm.CreateEncryptor();
+            _iv = algorithm.IV;
+            _block = new byte[algorithm.BlockSize >> 3];
         }
 
         public bool CanReuseTransform
@@ -42,21 +46,21 @@ namespace SshNet.Algorithms
 
         public int TransformBlock(byte[] inputBuffer, int inputOffset, int inputCount, byte[] outputBuffer, int outputOffset)
         {
-            var bytesWritten = 0;
+            var written = 0;
             var bytesPerBlock = InputBlockSize >> 3;
 
             for (var i = 0; i < inputCount; i += bytesPerBlock)
             {
-                bytesWritten += _transform.TransformBlock(_counter, inputCount + i, bytesPerBlock, outputBuffer, outputOffset + 1);
+                written += _transform.TransformBlock(_iv, 0, bytesPerBlock, _block, 0);
 
                 for (var j = 0; j < bytesPerBlock; j++)
-                    outputBuffer[outputOffset + j] ^= inputBuffer[inputOffset + j];
+                    outputBuffer[outputOffset + i + j] = (byte)(_block[j] ^ inputBuffer[inputOffset + i + j]);
 
-                var k = _counter.Length;
-                while (--k >= 0 && ++_counter[k] == 0) ;
+                var k = _iv.Length;
+                while (--k >= 0 && ++_iv[k] == 0) ;
             }
 
-            return bytesWritten;
+            return written;
         }
 
         public byte[] TransformFinalBlock(byte[] inputBuffer, int inputOffset, int inputCount)

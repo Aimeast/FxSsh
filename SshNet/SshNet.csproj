@@ -104,6 +104,7 @@
     <Compile Include="Messages\NewKeysMessage.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="Session.cs" />
+    <Compile Include="SshConnectionException.cs" />
     <Compile Include="SshDataWorker.cs" />
     <Compile Include="SshServer.cs" />
     <Compile Include="StartingInfo.cs" />
