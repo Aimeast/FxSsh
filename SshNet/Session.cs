@@ -300,10 +300,10 @@ namespace SshNet
             }
 
             var typeNumber = data[0];
-            if (!_messagesMetadata.ContainsKey(typeNumber))
-                throw new NotSupportedException(string.Format("Message type {0} is not valid.", typeNumber));
+            var message = _messagesMetadata.ContainsKey(typeNumber)
+                ? (Message)Activator.CreateInstance(_messagesMetadata[typeNumber])
+                : new UnimplementedMessage { SequenceNumber = _inboundPacketSequence, MessageType = typeNumber };
 
-            var message = (Message)Activator.CreateInstance(_messagesMetadata[typeNumber]);
             message.Load(data);
 
             _inboundPacketSequence++;
@@ -461,6 +461,20 @@ namespace SshNet
         {
             _algorithms = _exchangeContext.NewAlgorithms;
             _exchangeContext = null;
+        }
+
+        private void HandleMessage(UnimplementedMessage message)
+        {
+            SendMessage(message);
+        }
+
+        private void HandleMessage(ServiceRequestMessage message)
+        {
+            if (message.ServiceName == "ssh-userauth" || message.ServiceName == "ssh-connection")
+                SendMessage(new ServiceAcceptMessage(message.ServiceName));
+            else
+                throw new SshConnectionException(string.Format("Service \"{0}\" not available.", message.ServiceName),
+                    DisconnectReason.ServiceNotAvailable);
         }
         #endregion
 
