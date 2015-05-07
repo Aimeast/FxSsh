@@ -29,6 +29,8 @@ namespace SshNet
 
         public StartingInfo StartingInfo { get; private set; }
 
+        public event EventHandler<Session> ConnectionAccepted;
+
         public void Start()
         {
             lock (_lock)
@@ -92,6 +94,8 @@ namespace SshNet
                     {
                         try
                         {
+                            if (ConnectionAccepted != null)
+                                ConnectionAccepted(this, session);
                             session.EstablishConnection();
                         }
                         catch (SshConnectionException ex)

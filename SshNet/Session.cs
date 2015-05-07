@@ -1,5 +1,6 @@
 ﻿using SshNet.Algorithms;
 using SshNet.Messages;
+using SshNet.Services;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
@@ -23,15 +24,15 @@ namespace SshNet
 
         private static readonly RandomNumberGenerator _rng = new RNGCryptoServiceProvider();
         private static readonly Dictionary<byte, Type> _messagesMetadata;
-        private static readonly Dictionary<string, Func<KexAlgorithm>> _keyExchangeAlgorithms =
+        internal static readonly Dictionary<string, Func<KexAlgorithm>> _keyExchangeAlgorithms =
             new Dictionary<string, Func<KexAlgorithm>>();
-        private static readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms =
+        internal static readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms =
             new Dictionary<string, Func<string, PublicKeyAlgorithm>>();
-        private static readonly Dictionary<string, Func<CipherInfo>> _encryptionAlgorithms =
+        internal static readonly Dictionary<string, Func<CipherInfo>> _encryptionAlgorithms =
             new Dictionary<string, Func<CipherInfo>>();
-        private static readonly Dictionary<string, Func<HmacInfo>> _hmacAlgorithms =
+        internal static readonly Dictionary<string, Func<HmacInfo>> _hmacAlgorithms =
             new Dictionary<string, Func<HmacInfo>>();
-        private static readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms =
+        internal static readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms =
             new Dictionary<string, Func<CompressionAlgorithm>>();
 
         private readonly Socket _socket;
@@ -46,10 +47,16 @@ namespace SshNet
         private uint _inboundPacketSequence;
         private Algorithms _algorithms = null;
         private ExchangeContext _exchangeContext = new ExchangeContext();
+        private List<SshService> _services = new List<SshService>();
 
         public string ServerVersion { get; private set; }
         public string ClientVersion { get; private set; }
         public byte[] SessionId { get; private set; }
+        public bool IsConnected { get; private set; }
+        public T GetService<T>() where T : SshService
+        {
+            return (T)_services.FirstOrDefault(x => x is T);
+        }
 
         static Session()
         {
@@ -92,7 +99,7 @@ namespace SshNet
 
         public event EventHandler<EventArgs> Disconnected;
 
-        public bool IsConnected { get; private set; }
+        public event EventHandler<SshService> ServiceRegistered;
 
         public void EstablishConnection()
         {
@@ -311,7 +318,7 @@ namespace SshNet
             return message;
         }
 
-        private void SendMessage(Message message)
+        internal void SendMessage(Message message)
         {
             var useAlg = _algorithms != null;
 
@@ -355,7 +362,7 @@ namespace SshNet
             _outboundPacketSequence++;
         }
 
-        private bool TrySendMessage(Message message)
+        internal bool TrySendMessage(Message message)
         {
             try
             {
@@ -393,6 +400,11 @@ namespace SshNet
         private void HandleMessageCore(Message message)
         {
             HandleMessage((dynamic)message);
+        }
+
+        private void HandleMessage(DisconnectMessage message)
+        {
+            Disconnect(message.ReasonCode, message.Description);
         }
 
         private void HandleMessage(KeyExchangeInitMessage message)
@@ -470,11 +482,21 @@ namespace SshNet
 
         private void HandleMessage(ServiceRequestMessage message)
         {
-            if (message.ServiceName == "ssh-userauth" || message.ServiceName == "ssh-connection")
+            SshService service = RegisterService(message.ServiceName);
+            if (service != null)
+            {
                 SendMessage(new ServiceAcceptMessage(message.ServiceName));
-            else
-                throw new SshConnectionException(string.Format("Service \"{0}\" not available.", message.ServiceName),
-                    DisconnectReason.ServiceNotAvailable);
+                return;
+            }
+            throw new SshConnectionException(string.Format("Service \"{0}\" not available.", message.ServiceName),
+                DisconnectReason.ServiceNotAvailable);
+        }
+
+        private void HandleMessage(UserauthServiceMessage message)
+        {
+            var service = GetService<UserauthService>();
+            if (service != null)
+                service.HandleMessageCore(message);
         }
         #endregion
 
@@ -553,6 +575,28 @@ namespace SshNet
 
                 return alg.ComputeHash(worker.ToArray());
             }
+        }
+
+        internal SshService RegisterService(string serviceName, bool byAuth = false)
+        {
+            SshService service = null;
+            switch (serviceName)
+            {
+                case "ssh-userauth":
+                    if (GetService<UserauthService>() == null)
+                        service = new UserauthService(this);
+                    break;
+                case "ssh-connection":
+                    break;
+            }
+            if (service != null)
+            {
+                if (ServiceRegistered != null)
+                    ServiceRegistered(this, service);
+
+                _services.Add(service);
+            }
+            return service;
         }
 
         private class Algorithms

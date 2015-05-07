@@ -8,7 +8,8 @@ namespace SshNet.Algorithms
     {
         public PublicKeyAlgorithm(string xml)
         {
-            ImportKey(xml);
+            if (!string.IsNullOrEmpty(xml))
+                ImportKey(xml);
         }
 
         public abstract string Name { get; }

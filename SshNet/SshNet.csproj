@@ -105,12 +105,21 @@
     <Compile Include="Messages\ServiceAcceptMessage.cs" />
     <Compile Include="Messages\ServiceRequestMessage.cs" />
     <Compile Include="Messages\UnimplementedMessage.cs" />
+    <Compile Include="Messages\Userauth\FailureMessage.cs" />
+    <Compile Include="Messages\Userauth\PublicKeyOkMessage.cs" />
+    <Compile Include="Messages\Userauth\PublicKeyRequestMessage.cs" />
+    <Compile Include="Messages\Userauth\RequestMessage.cs" />
+    <Compile Include="Messages\Userauth\SuccessMessage.cs" />
+    <Compile Include="Messages\UserauthServiceMessage.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <Compile Include="Services\SshService.cs" />
+    <Compile Include="Services\UserauthService.cs" />
     <Compile Include="Session.cs" />
     <Compile Include="SshConnectionException.cs" />
     <Compile Include="SshDataWorker.cs" />
     <Compile Include="SshServer.cs" />
     <Compile Include="StartingInfo.cs" />
+    <Compile Include="UserauthArgs.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />

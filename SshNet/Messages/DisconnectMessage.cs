@@ -9,6 +9,10 @@ namespace SshNet.Messages
     {
         private const byte MessageNumber = 1;
 
+        public DisconnectMessage()
+        {
+        }
+
         public DisconnectMessage(DisconnectReason reasonCode, string description = "", string language = "en")
         {
             Contract.Requires(description != null);
