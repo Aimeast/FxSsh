@@ -13,26 +13,21 @@ namespace SshNet.Messages.Userauth
 
         public byte[] PayloadWithoutSignature { get; private set; }
 
-        public override void Load(byte[] bytes)
+        protected override void OnLoad(SshDataWorker reader)
         {
-            using (var worker = new SshDataWorker(bytes))
+            base.OnLoad(reader);
+
+            if (MethodName != "publickey")
+                throw new ArgumentException(string.Format("Method name {0} is not valid.", MethodName));
+
+            HasSignature = reader.ReadBoolean();
+            KeyAlgorithmName = reader.ReadString(Encoding.ASCII);
+            PublicKey = reader.ReadBinary();
+
+            if (HasSignature)
             {
-                var number = worker.ReadByte();
-                if (number != MessageNumber)
-                    throw new ArgumentException(string.Format("Message type {0} is not valid.", number));
-
-                Username = worker.ReadString(Encoding.UTF8);
-                ServiceName = worker.ReadString(Encoding.ASCII);
-                MethodName = worker.ReadString(Encoding.ASCII); // publickey
-                HasSignature = worker.ReadBoolean();
-                KeyAlgorithmName = worker.ReadString(Encoding.ASCII);
-                PublicKey = worker.ReadBinary();
-
-                if (HasSignature)
-                {
-                    Signature = worker.ReadBinary();
-                    PayloadWithoutSignature = bytes.Take(bytes.Length - Signature.Length - 5).ToArray();
-                }
+                Signature = reader.ReadBinary();
+                PayloadWithoutSignature = RawBytes.Take(RawBytes.Length - Signature.Length - 5).ToArray();
             }
         }
     }

@@ -9,21 +9,11 @@ namespace SshNet.Messages
 
         public byte[] E { get; private set; }
 
-        public override void Load(byte[] bytes)
-        {
-            using (var worker = new SshDataWorker(bytes))
-            {
-                var number = worker.ReadByte();
-                if (number != MessageNumber)
-                    throw new ArgumentException(string.Format("Message type {0} is not valid.", number));
+        protected override byte MessageType { get { return MessageNumber; } }
 
-                E = worker.ReadMpint();
-            }
-        }
-
-        public override byte[] GetPacket()
+        protected override void OnLoad(SshDataWorker reader)
         {
-            throw new NotSupportedException();
+            E = reader.ReadMpint();
         }
     }
 }

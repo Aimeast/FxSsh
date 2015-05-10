@@ -11,23 +11,13 @@ namespace SshNet.Messages
         public byte[] F { get; set; }
         public byte[] Signature { get; set; }
 
+        protected override byte MessageType { get { return MessageNumber; } }
 
-        public override void Load(byte[] bytes)
+        protected override void OnGetPacket(SshDataWorker writer)
         {
-            throw new NotSupportedException();
-        }
-
-        public override byte[] GetPacket()
-        {
-            using (var worker = new SshDataWorker())
-            {
-                worker.Write(MessageNumber);
-                worker.WriteBinary(HostKey);
-                worker.WriteMpint(F);
-                worker.WriteBinary(Signature);
-
-                return worker.ToArray();
-            }
+            writer.WriteBinary(HostKey);
+            writer.WriteMpint(F);
+            writer.WriteBinary(Signature);
         }
     }
 }

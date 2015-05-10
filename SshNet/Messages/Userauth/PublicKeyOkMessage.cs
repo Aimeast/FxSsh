@@ -11,21 +11,12 @@ namespace SshNet.Messages.Userauth
         public string KeyAlgorithmName { get; set; }
         public byte[] PublicKey { get; set; }
 
-        public override void Load(byte[] bytes)
-        {
-            throw new NotSupportedException();
-        }
+        protected override byte MessageType { get { return MessageNumber; } }
 
-        public override byte[] GetPacket()
+        protected override void OnGetPacket(SshDataWorker writer)
         {
-            using (var worker = new SshDataWorker())
-            {
-                worker.Write(MessageNumber);
-                worker.Write(KeyAlgorithmName, Encoding.ASCII);
-                worker.WriteBinary(PublicKey);
-
-                return worker.ToArray();
-            }
+            writer.Write(KeyAlgorithmName, Encoding.ASCII);
+            writer.WriteBinary(PublicKey);
         }
     }
 }

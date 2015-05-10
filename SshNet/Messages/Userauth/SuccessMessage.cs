@@ -7,14 +7,10 @@ namespace SshNet.Messages.Userauth
     {
         private const byte MessageNumber = 52;
 
-        public override void Load(byte[] bytes)
-        {
-            throw new NotSupportedException();
-        }
+        protected override byte MessageType { get { return MessageNumber; } }
 
-        public override byte[] GetPacket()
+        protected override void OnGetPacket(SshDataWorker writer)
         {
-            return new byte[] { MessageNumber };
         }
     }
 }

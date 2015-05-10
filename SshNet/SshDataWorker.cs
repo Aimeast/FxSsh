@@ -171,7 +171,7 @@ namespace SshNet
             return ReadBinary((int)length);
         }
 
-        public byte[] ToArray()
+        public byte[] ToByteArray()
         {
             return _ms.ToArray();
         }

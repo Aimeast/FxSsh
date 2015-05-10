@@ -27,7 +27,7 @@ namespace SshNet.Algorithms
         {
             using (var worker = new SshDataWorker(signatureData))
             {
-                if (worker.ReadString(Encoding.UTF8) != this.Name)
+                if (worker.ReadString(Encoding.ASCII) != this.Name)
                     throw new CryptographicException("Signature was not created with this algorithm.");
 
                 var signature = worker.ReadBinary();
@@ -41,10 +41,10 @@ namespace SshNet.Algorithms
             {
                 var signature = SignData(data);
 
-                worker.Write(this.Name, Encoding.UTF8);
+                worker.Write(this.Name, Encoding.ASCII);
                 worker.WriteBinary(signature);
 
-                return worker.ToArray();
+                return worker.ToByteArray();
             }
         }
 

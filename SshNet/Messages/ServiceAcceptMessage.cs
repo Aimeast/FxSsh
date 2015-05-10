@@ -15,20 +15,11 @@ namespace SshNet.Messages
 
         public string ServiceName { get; private set; }
 
-        public override void Load(byte[] bytes)
-        {
-            throw new NotSupportedException();
-        }
+        protected override byte MessageType { get { return MessageNumber; } }
 
-        public override byte[] GetPacket()
+        protected override void OnGetPacket(SshDataWorker writer)
         {
-            using (var worker = new SshDataWorker())
-            {
-                worker.Write(MessageNumber);
-                worker.Write(ServiceName, Encoding.ASCII);
-
-                return worker.ToArray();
-            }
+            writer.Write(ServiceName, Encoding.ASCII);
         }
     }
 }

@@ -7,17 +7,14 @@ namespace SshNet.Messages
     {
         private const byte MessageNumber = 21;
 
-        public override void Load(byte[] bytes)
-        {
-            var number = bytes[0];
-            if (number != MessageNumber)
-                throw new ArgumentException(string.Format("Message type {0} is not valid.", number));
+        protected override byte MessageType { get { return MessageNumber; } }
 
+        protected override void OnLoad(SshDataWorker reader)
+        {
         }
 
-        public override byte[] GetPacket()
+        protected override void OnGetPacket(SshDataWorker writer)
         {
-            return new byte[] { MessageNumber };
         }
     }
 }

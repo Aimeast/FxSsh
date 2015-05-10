@@ -27,31 +27,20 @@ namespace SshNet.Messages
         public string Description { get; private set; }
         public string Language { get; private set; }
 
-        public override void Load(byte[] bytes)
-        {
-            using (var worker = new SshDataWorker(bytes))
-            {
-                var number = worker.ReadByte();
-                if (number != MessageNumber)
-                    throw new ArgumentException(string.Format("Message type {0} is not valid.", number));
+        protected override byte MessageType { get { return MessageNumber; } }
 
-                ReasonCode = (DisconnectReason)worker.ReadUInt32();
-                Description = worker.ReadString(Encoding.UTF8);
-                Language = worker.ReadString(Encoding.UTF8);
-            }
+        protected override void OnLoad(SshDataWorker reader)
+        {
+            ReasonCode = (DisconnectReason)reader.ReadUInt32();
+            Description = reader.ReadString(Encoding.UTF8);
+            Language = reader.ReadString(Encoding.UTF8);
         }
 
-        public override byte[] GetPacket()
+        protected override void OnGetPacket(SshDataWorker writer)
         {
-            using (var worker = new SshDataWorker())
-            {
-                worker.Write(MessageNumber);
-                worker.Write((uint)ReasonCode);
-                worker.Write(Description, Encoding.UTF8);
-                worker.Write(Language ?? "en", Encoding.UTF8);
-
-                return worker.ToArray();
-            }
+            writer.Write((uint)ReasonCode);
+            writer.Write(Description, Encoding.UTF8);
+            writer.Write(Language ?? "en", Encoding.UTF8);
         }
     }
 }

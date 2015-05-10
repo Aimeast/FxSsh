@@ -203,7 +203,7 @@ namespace SshNet
 
         private void SocketWriteLine(string str)
         {
-            SocketWrite(Encoding.UTF8.GetBytes(str + Environment.NewLine));
+            SocketWrite(Encoding.ASCII.GetBytes(str + Environment.NewLine));
         }
 
         private byte[] SocketRead(int length)
@@ -307,11 +307,13 @@ namespace SshNet
             }
 
             var typeNumber = data[0];
-            var message = _messagesMetadata.ContainsKey(typeNumber)
+            var implemented = _messagesMetadata.ContainsKey(typeNumber);
+            var message = implemented
                 ? (Message)Activator.CreateInstance(_messagesMetadata[typeNumber])
-                : new UnimplementedMessage { SequenceNumber = _inboundPacketSequence, MessageType = typeNumber };
+                : new UnimplementedMessage { SequenceNumber = _inboundPacketSequence, UnimplementedMessageType = typeNumber };
 
-            message.Load(data);
+            if (implemented)
+                message.Load(data);
 
             _inboundPacketSequence++;
 
@@ -348,7 +350,7 @@ namespace SshNet
                 worker.Write(payload);
                 worker.Write(padding);
 
-                payload = worker.ToArray();
+                payload = worker.ToByteArray();
             }
 
             if (useAlg)
@@ -526,7 +528,7 @@ namespace SshNet
                 worker.WriteMpint(serverExchangeValue);
                 worker.WriteMpint(sharedSecret);
 
-                return kexAlg.ComputeHash(worker.ToArray());
+                return kexAlg.ComputeHash(worker.ToByteArray());
             }
         }
 
@@ -554,7 +556,7 @@ namespace SshNet
                         worker.Write(currentHash);
                     }
 
-                    currentHash = kexAlg.ComputeHash(worker.ToArray());
+                    currentHash = kexAlg.ComputeHash(worker.ToByteArray());
                 }
 
                 currentHashLength = Math.Min(currentHash.Length, blockSize - keyBufferIndex);
@@ -573,7 +575,7 @@ namespace SshNet
                 worker.Write(seq);
                 worker.Write(payload);
 
-                return alg.ComputeHash(worker.ToArray());
+                return alg.ComputeHash(worker.ToByteArray());
             }
         }
 

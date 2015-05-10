@@ -12,26 +12,13 @@ namespace SshNet.Messages.Userauth
         public string ServiceName { get; protected set; }
         public string MethodName { get; protected set; }
 
-        public byte[] RawBytes { get; private set; }
+        protected override byte MessageType { get { return MessageNumber; } }
 
-        public override void Load(byte[] bytes)
+        protected override void OnLoad(SshDataWorker reader)
         {
-            using (var worker = new SshDataWorker(bytes))
-            {
-                var number = worker.ReadByte();
-                if (number != MessageNumber)
-                    throw new ArgumentException(string.Format("Message type {0} is not valid.", number));
-
-                Username = worker.ReadString(Encoding.UTF8);
-                ServiceName = worker.ReadString(Encoding.ASCII);
-                MethodName = worker.ReadString(Encoding.ASCII);
-            }
-            RawBytes = bytes;
-        }
-
-        public override byte[] GetPacket()
-        {
-            throw new NotSupportedException();
+            Username = reader.ReadString(Encoding.UTF8);
+            ServiceName = reader.ReadString(Encoding.ASCII);
+            MethodName = reader.ReadString(Encoding.ASCII);
         }
     }
 }

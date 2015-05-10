@@ -43,51 +43,40 @@ namespace SshNet.Messages
 
         public uint Reserved { get; set; }
 
-        public override void Load(byte[] bytes)
-        {
-            using (var worker = new SshDataWorker(bytes))
-            {
-                var number = worker.ReadByte();
-                if (number != MessageNumber)
-                    throw new ArgumentException(string.Format("Message type {0} is not valid.", number));
+        protected override byte MessageType { get { return MessageNumber; } }
 
-                Cookie = worker.ReadBinary(16);
-                KeyExchangeAlgorithms = worker.ReadString(Encoding.UTF8).Split(',');
-                ServerHostKeyAlgorithms = worker.ReadString(Encoding.UTF8).Split(',');
-                EncryptionAlgorithmsClientToServer = worker.ReadString(Encoding.UTF8).Split(',');
-                EncryptionAlgorithmsServerToClient = worker.ReadString(Encoding.UTF8).Split(',');
-                MacAlgorithmsClientToServer = worker.ReadString(Encoding.UTF8).Split(',');
-                MacAlgorithmsServerToClient = worker.ReadString(Encoding.UTF8).Split(',');
-                CompressionAlgorithmsClientToServer = worker.ReadString(Encoding.UTF8).Split(',');
-                CompressionAlgorithmsServerToClient = worker.ReadString(Encoding.UTF8).Split(',');
-                LanguagesClientToServer = worker.ReadString(Encoding.UTF8).Split(',');
-                LanguagesServerToClient = worker.ReadString(Encoding.UTF8).Split(',');
-                FirstKexPacketFollows = worker.ReadBoolean();
-                Reserved = worker.ReadUInt32();
-            }
+        protected override void OnLoad(SshDataWorker reader)
+        {
+            Cookie = reader.ReadBinary(16);
+            KeyExchangeAlgorithms = reader.ReadString(Encoding.ASCII).Split(',');
+            ServerHostKeyAlgorithms = reader.ReadString(Encoding.ASCII).Split(',');
+            EncryptionAlgorithmsClientToServer = reader.ReadString(Encoding.ASCII).Split(',');
+            EncryptionAlgorithmsServerToClient = reader.ReadString(Encoding.ASCII).Split(',');
+            MacAlgorithmsClientToServer = reader.ReadString(Encoding.ASCII).Split(',');
+            MacAlgorithmsServerToClient = reader.ReadString(Encoding.ASCII).Split(',');
+            CompressionAlgorithmsClientToServer = reader.ReadString(Encoding.ASCII).Split(',');
+            CompressionAlgorithmsServerToClient = reader.ReadString(Encoding.ASCII).Split(',');
+            LanguagesClientToServer = reader.ReadString(Encoding.ASCII).Split(',');
+            LanguagesServerToClient = reader.ReadString(Encoding.ASCII).Split(',');
+            FirstKexPacketFollows = reader.ReadBoolean();
+            Reserved = reader.ReadUInt32();
         }
 
-        public override byte[] GetPacket()
+        protected override void OnGetPacket(SshDataWorker writer)
         {
-            using (var worker = new SshDataWorker())
-            {
-                worker.Write(MessageNumber);
-                worker.Write(Cookie);
-                worker.Write(string.Join(",", KeyExchangeAlgorithms), Encoding.UTF8);
-                worker.Write(string.Join(",", ServerHostKeyAlgorithms), Encoding.UTF8);
-                worker.Write(string.Join(",", EncryptionAlgorithmsClientToServer), Encoding.UTF8);
-                worker.Write(string.Join(",", EncryptionAlgorithmsServerToClient), Encoding.UTF8);
-                worker.Write(string.Join(",", MacAlgorithmsClientToServer), Encoding.UTF8);
-                worker.Write(string.Join(",", MacAlgorithmsServerToClient), Encoding.UTF8);
-                worker.Write(string.Join(",", CompressionAlgorithmsClientToServer), Encoding.UTF8);
-                worker.Write(string.Join(",", CompressionAlgorithmsServerToClient), Encoding.UTF8);
-                worker.Write(string.Join(",", LanguagesClientToServer), Encoding.UTF8);
-                worker.Write(string.Join(",", LanguagesServerToClient), Encoding.UTF8);
-                worker.Write(FirstKexPacketFollows);
-                worker.Write(Reserved);
-
-                return worker.ToArray();
-            }
+            writer.Write(Cookie);
+            writer.Write(string.Join(",", KeyExchangeAlgorithms), Encoding.ASCII);
+            writer.Write(string.Join(",", ServerHostKeyAlgorithms), Encoding.ASCII);
+            writer.Write(string.Join(",", EncryptionAlgorithmsClientToServer), Encoding.ASCII);
+            writer.Write(string.Join(",", EncryptionAlgorithmsServerToClient), Encoding.ASCII);
+            writer.Write(string.Join(",", MacAlgorithmsClientToServer), Encoding.ASCII);
+            writer.Write(string.Join(",", MacAlgorithmsServerToClient), Encoding.ASCII);
+            writer.Write(string.Join(",", CompressionAlgorithmsClientToServer), Encoding.ASCII);
+            writer.Write(string.Join(",", CompressionAlgorithmsServerToClient), Encoding.ASCII);
+            writer.Write(string.Join(",", LanguagesClientToServer), Encoding.ASCII);
+            writer.Write(string.Join(",", LanguagesServerToClient), Encoding.ASCII);
+            writer.Write(FirstKexPacketFollows);
+            writer.Write(Reserved);
         }
     }
 }

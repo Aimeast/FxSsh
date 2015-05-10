@@ -9,21 +9,14 @@ namespace SshNet.Messages
 
         public uint SequenceNumber { get; set; }
 
-        public byte MessageType { get; set; }
+        public byte UnimplementedMessageType { get; set; }
 
-        public override void Load(byte[] bytes)
+        protected override byte MessageType { get { return MessageNumber; } }
+
+        protected override void OnGetPacket(SshDataWorker writer)
         {
-        }
-
-        public override byte[] GetPacket()
-        {
-            using (var worker = new SshDataWorker())
-            {
-                worker.Write(MessageNumber);
-                worker.Write(SequenceNumber);
-
-                return worker.ToArray();
-            }
+            writer.Write(MessageNumber);
+            writer.Write(SequenceNumber);
         }
     }
 }

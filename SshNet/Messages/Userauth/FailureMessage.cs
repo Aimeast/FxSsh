@@ -8,21 +8,12 @@ namespace SshNet.Messages.Userauth
     {
         private const byte MessageNumber = 51;
 
-        public override void Load(byte[] bytes)
-        {
-            throw new NotSupportedException();
-        }
+        protected override byte MessageType { get { return MessageNumber; } }
 
-        public override byte[] GetPacket()
+        protected override void OnGetPacket(SshDataWorker writer)
         {
-            using (var worker = new SshDataWorker())
-            {
-                worker.Write(MessageNumber);
-                worker.Write("publickey", Encoding.ASCII); // only accept public key
-                worker.Write(false);
-
-                return worker.ToArray();
-            }
+            writer.Write("publickey", Encoding.ASCII); // only accept public key
+            writer.Write(false);
         }
     }
 }

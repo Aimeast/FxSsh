@@ -26,7 +26,7 @@ namespace SshNet.Services
             {
                 case "publickey":
                     var msg = new PublicKeyRequestMessage();
-                    msg.Load(message.RawBytes);
+                    msg.LoadFrom(message);
                     HandleMessage(msg);
                     break;
                 case "password":
@@ -59,7 +59,7 @@ namespace SshNet.Services
                     worker.WriteBinary(_session.SessionId);
                     worker.Write(message.PayloadWithoutSignature);
 
-                    verifed = keyAlg.VerifyData(worker.ToArray(), sig);
+                    verifed = keyAlg.VerifyData(worker.ToByteArray(), sig);
                 }
 
                 if (verifed && Userauth != null)

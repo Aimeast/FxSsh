@@ -26,7 +26,7 @@ namespace SshNet.Algorithms
         {
             using (var worker = new SshDataWorker(data))
             {
-                if (worker.ReadString(Encoding.UTF8) != this.Name)
+                if (worker.ReadString(Encoding.ASCII) != this.Name)
                     throw new CryptographicException("Key and certificates were not created with this algorithm.");
 
                 var args = new RSAParameters();
@@ -43,11 +43,11 @@ namespace SshNet.Algorithms
             {
                 var args = _algorithm.ExportParameters(false);
 
-                worker.Write(this.Name, Encoding.UTF8);
+                worker.Write(this.Name, Encoding.ASCII);
                 worker.WriteMpint(args.Exponent);
                 worker.WriteMpint(args.Modulus);
 
-                return worker.ToArray();
+                return worker.ToByteArray();
             }
         }
 
