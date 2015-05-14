@@ -3,7 +3,7 @@ namespace SshNet.Services
 {
     public abstract class SshService
     {
-        protected readonly Session _session;
+        protected internal readonly Session _session;
 
         public SshService(Session session)
         {

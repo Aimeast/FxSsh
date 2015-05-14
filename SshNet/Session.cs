@@ -18,9 +18,9 @@ namespace SshNet
         private const byte Null = 0x00;
         private const byte CarriageReturn = 0x0d;
         private const byte LineFeed = 0x0a;
-        private const int MaximumSshPacketSize = LocalChannelDataPacketSize + 3000;
-        private const int InitialLocalWindowSize = LocalChannelDataPacketSize * 32;
-        private const int LocalChannelDataPacketSize = 1024 * 64;
+        internal const int MaximumSshPacketSize = LocalChannelDataPacketSize + 3000;
+        internal const int InitialLocalWindowSize = LocalChannelDataPacketSize * 32;
+        internal const int LocalChannelDataPacketSize = 1024 * 64;
 
         private static readonly RandomNumberGenerator _rng = new RNGCryptoServiceProvider();
         private static readonly Dictionary<byte, Type> _messagesMetadata;
@@ -208,6 +208,9 @@ namespace SshNet
 
         private byte[] SocketRead(int length)
         {
+            if (length == 0)
+                return new byte[0];
+
             var receivedTotal = 0;  // how many bytes is already received
             var buffer = new byte[length];
 
@@ -500,6 +503,13 @@ namespace SshNet
             if (service != null)
                 service.HandleMessageCore(message);
         }
+
+        private void HandleMessage(ConnectionServiceMessage message)
+        {
+            var service = GetService<ConnectionService>();
+            if (service != null)
+                service.HandleMessageCore(message);
+        }
         #endregion
 
         private string ChooseAlgorithm(string[] serverAlgorithms, string[] clientAlgorithms)
@@ -589,6 +599,8 @@ namespace SshNet
                         service = new UserauthService(this);
                     break;
                 case "ssh-connection":
+                    if (byAuth && GetService<ConnectionService>() == null)
+                        service = new ConnectionService(this);
                     break;
             }
             if (service != null)
