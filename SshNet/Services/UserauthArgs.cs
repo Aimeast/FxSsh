@@ -1,6 +1,6 @@
 ﻿using System.Diagnostics.Contracts;
 
-namespace SshNet
+namespace SshNet.Services
 {
     public class UserauthArgs
     {

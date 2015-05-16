@@ -41,7 +41,7 @@ namespace SshNet
 #else
         private readonly TimeSpan _timeout = TimeSpan.FromSeconds(30);
 #endif
-        private readonly string _hostKey;
+        private readonly Dictionary<string, string> _hostKey;
 
         private uint _outboundPacketSequence;
         private uint _inboundPacketSequence;
@@ -78,7 +78,6 @@ namespace SshNet
             _hmacAlgorithms.Add("hmac-sha1", () => new HmacInfo(new HMACSHA1(), 160));
 
             _compressionAlgorithms.Add("none", () => new NoCompression());
-            _compressionAlgorithms.Add("zlib", () => new ZlibCompression());
 
             _messagesMetadata = (from t in typeof(Message).Assembly.GetTypes()
                                  let attrib = (MessageAttribute)t.GetCustomAttributes(typeof(MessageAttribute), false).FirstOrDefault()
@@ -87,13 +86,13 @@ namespace SshNet
                                  .ToDictionary(x => x.Number, x => x.Type);
         }
 
-        public Session(Socket socket, string hostKey)
+        public Session(Socket socket, Dictionary<string, string> hostKey)
         {
             Contract.Requires(socket != null);
             Contract.Requires(hostKey != null);
 
             _socket = socket;
-            _hostKey = hostKey;
+            _hostKey = hostKey.ToDictionary(s => s.Key, s => s.Value);
             ServerVersion = "SSH-2.0-SshNet";
         }
 
@@ -429,7 +428,7 @@ namespace SshNet
         private void HandleMessage(KeyExchangeDhInitMessage message)
         {
             var kexAlg = _keyExchangeAlgorithms[_exchangeContext.KeyExchange]();
-            var hostKeyAlg = _publicKeyAlgorithms[_exchangeContext.PublicKey](_hostKey);
+            var hostKeyAlg = _publicKeyAlgorithms[_exchangeContext.PublicKey](_hostKey[_exchangeContext.PublicKey].ToString());
             var clientCipher = _encryptionAlgorithms[_exchangeContext.ClientEncryption]();
             var serverCipher = _encryptionAlgorithms[_exchangeContext.ServerEncryption]();
             var serverHmac = _hmacAlgorithms[_exchangeContext.ServerHmac]();

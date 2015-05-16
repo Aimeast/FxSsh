@@ -27,7 +27,7 @@ namespace SshNet.Algorithms
             if (bitlen == 1024)
             {
                 _p = BigInteger.Parse(Okley1024, NumberStyles.HexNumber);
-                _g = new BigInteger(22);
+                _g = new BigInteger(2);
             }
             else if (bitlen == 2048)
             {

@@ -11,10 +11,10 @@ namespace SshNet
     {
         private readonly object _lock = new object();
         private readonly List<Session> _sessions = new List<Session>();
+        private readonly Dictionary<string, string> _hostKey = new Dictionary<string, string>();
         private bool _isDisposed;
         private bool _started;
         private TcpListener _listenser = null;
-        private string _hostKey = null;
 
         public SshServer()
             : this(new StartingInfo())
@@ -75,9 +75,10 @@ namespace SshNet
             }
         }
 
-        public void SetHostKey(string xml)
+        public void AddHostKey(string type, string xml)
         {
-            _hostKey = xml;
+            if (!_hostKey.ContainsKey(type))
+                _hostKey.Add(type, xml);
         }
 
         private void AcceptSocket()

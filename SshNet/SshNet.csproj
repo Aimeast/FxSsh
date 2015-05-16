@@ -93,7 +93,6 @@
     <Compile Include="Algorithms\NoCompression.cs" />
     <Compile Include="Algorithms\PublicKeyAlgorithm.cs" />
     <Compile Include="Algorithms\RsaKey.cs" />
-    <Compile Include="Algorithms\ZlibCompression.cs" />
     <Compile Include="ChannelOpenFailureReason.cs" />
     <Compile Include="DisconnectReason.cs" />
     <Compile Include="Messages\ConnectionServiceMessage.cs" />
@@ -133,13 +132,13 @@
     <Compile Include="Services\SessionChannel.cs" />
     <Compile Include="Services\SessionRequestedArgs.cs" />
     <Compile Include="Services\SshService.cs" />
+    <Compile Include="Services\UserauthArgs.cs" />
     <Compile Include="Services\UserauthService.cs" />
     <Compile Include="Session.cs" />
     <Compile Include="SshConnectionException.cs" />
     <Compile Include="SshDataWorker.cs" />
     <Compile Include="SshServer.cs" />
     <Compile Include="StartingInfo.cs" />
-    <Compile Include="UserauthArgs.cs" />
   </ItemGroup>
   <ItemGroup>
     <None Include="App.config" />
