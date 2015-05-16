@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace SshNet
@@ -43,7 +44,7 @@ namespace SshNet
                     ? TcpListener.Create(StartingInfo.Port) // dual stack
                     : new TcpListener(StartingInfo.LocalAddress, StartingInfo.Port);
                 _listenser.Start();
-                Task.Run(() => AcceptSocket());
+                BeginAcceptSocket();
 
                 _started = true;
             }
@@ -81,45 +82,59 @@ namespace SshNet
                 _hostKey.Add(type, xml);
         }
 
-        private void AcceptSocket()
+        private void BeginAcceptSocket()
         {
-            while (true)
+            try
             {
-                try
-                {
-                    var socket = _listenser.AcceptSocket();
-                    var session = new Session(socket, _hostKey);
-                    session.Disconnected += (ss, ee) => _sessions.Remove(session);
-                    _sessions.Add(session);
-                    Task.Run(() =>
-                    {
-                        try
-                        {
-                            if (ConnectionAccepted != null)
-                                ConnectionAccepted(this, session);
-                            session.EstablishConnection();
-                        }
-                        catch (SshConnectionException ex)
-                        {
-                            session.Disconnect(ex.DisconnectReason, ex.Message);
-                        }
-                        catch
-                        {
-                            session.Disconnect();
-                        }
-                    });
-                }
-                catch (InvalidOperationException)
-                {
-                    if (_isDisposed || !_started)
-                        return;
+                _listenser.BeginAcceptSocket(AcceptSocket, null);
+            }
+            catch (ObjectDisposedException)
+            {
+                return;
+            }
+            catch
+            {
+                BeginAcceptSocket();
+            }
+        }
 
-                    throw;
-                }
-                catch (Exception)
+        private void AcceptSocket(IAsyncResult ar)
+        {
+            try
+            {
+                var socket = _listenser.EndAcceptSocket(ar);
+                Task.Run(() =>
                 {
-                    throw;
-                }
+                    var session = new Session(socket, _hostKey);
+                    session.Disconnected += (ss, ee) => { lock (_lock) _sessions.Remove(session); };
+                    lock (_lock)
+                        _sessions.Add(session);
+                    try
+                    {
+                        if (ConnectionAccepted != null)
+                            ConnectionAccepted(this, session);
+                        session.EstablishConnection();
+                    }
+                    catch (SshConnectionException ex)
+                    {
+                        session.Disconnect(ex.DisconnectReason, ex.Message);
+                    }
+                    catch
+                    {
+                        session.Disconnect();
+                    }
+                });
+            }
+            catch (InvalidOperationException)
+            {
+                if (_isDisposed || !_started)
+                    return;
+
+                throw;
+            }
+            finally
+            {
+                BeginAcceptSocket();
             }
         }
 

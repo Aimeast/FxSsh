@@ -4,7 +4,6 @@ using SshNet.Services;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
-using System.Globalization;
 using System.Linq;
 using System.Net.Sockets;
 using System.Security.Cryptography;
@@ -15,7 +14,6 @@ namespace SshNet
 {
     public class Session
     {
-        private const byte Null = 0x00;
         private const byte CarriageReturn = 0x0d;
         private const byte LineFeed = 0x0a;
         internal const int MaximumSshPacketSize = LocalChannelDataPacketSize + 3000;
@@ -107,8 +105,8 @@ namespace SshNet
 
             SetSocketOptions();
 
-            SocketWriteLine(ServerVersion);
-            ClientVersion = SocketReadLine();
+            SocketWriteProtocolVersion();
+            ClientVersion = SocketReadProtocolVersion();
             var clientIdVersions = ClientVersion.Split('-')[1];
             if (clientIdVersions != "2.0")
             {
@@ -160,70 +158,51 @@ namespace SshNet
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, socketBufferSize);
         }
 
-        private string SocketReadLine()
+        private string SocketReadProtocolVersion()
         {
-            var encoding = Encoding.ASCII;
-            var buffer = new List<byte>();
-            var data = new byte[1];
+            // http://tools.ietf.org/html/rfc4253#section-4.2
+            var buffer = new byte[255];
+            var pos = 0;
 
-            // read data one byte at a time to find end of line and leave any unhandled information in the buffer
-            // to be processed by subsequent invocations
-            do
+            while (pos < buffer.Length)
             {
-                var asyncResult = _socket.BeginReceive(data, 0, data.Length, SocketFlags.None, null, null);
-                if (!asyncResult.AsyncWaitHandle.WaitOne(_timeout))
-                    throw new TimeoutException(string.Format(CultureInfo.InvariantCulture,
-                        "Socket read operation has timed out after {0:F0} milliseconds.", _timeout.TotalMilliseconds));
+                var ar = _socket.BeginReceive(buffer, pos, buffer.Length - pos, SocketFlags.Peek, null, null);
+                WaitHandle(ar);
+                pos += _socket.EndReceive(ar);
 
-                var received = _socket.EndReceive(asyncResult);
-
-                if (received == 0)
-                    // the remote server shut down the socket
-                    break;
-
-                buffer.Add(data[0]);
+                for (var i = 10; i < pos; i++)
+                {
+                    if (buffer[i - 2] == CarriageReturn && buffer[i - 1] == LineFeed)
+                    {
+                        _socket.Receive(buffer, 0, i, SocketFlags.None);
+                        return Encoding.ASCII.GetString(buffer, 0, i - 2);
+                    }
+                }
             }
-            while (!(buffer.Count > 0 && (buffer[buffer.Count - 1] == LineFeed || buffer[buffer.Count - 1] == Null)));
-
-            if (buffer.Count == 0)
-                return null;
-            else if (buffer.Count == 1 && buffer[buffer.Count - 1] == 0x00)
-                // return an empty version string if the buffer consists of only a 0x00 character
-                return string.Empty;
-            else if (buffer.Count > 1 && buffer[buffer.Count - 2] == CarriageReturn)
-                // strip trailing CRLF
-                return encoding.GetString(buffer.Take(buffer.Count - 2).ToArray());
-            else if (buffer.Count > 1 && buffer[buffer.Count - 1] == LineFeed)
-                // strip trailing LF
-                return encoding.GetString(buffer.Take(buffer.Count - 1).ToArray());
-            else
-                return encoding.GetString(buffer.ToArray());
+            throw new SshConnectionException("Could't read the protocal version", DisconnectReason.ProtocolError);
         }
 
-        private void SocketWriteLine(string str)
+        private void SocketWriteProtocolVersion()
         {
-            SocketWrite(Encoding.ASCII.GetBytes(str + Environment.NewLine));
+            SocketWrite(Encoding.ASCII.GetBytes(ServerVersion + "\r\n"));
         }
 
         private byte[] SocketRead(int length)
         {
-            if (length == 0)
-                return new byte[0];
-
-            var receivedTotal = 0;  // how many bytes is already received
+            var pos = 0;
             var buffer = new byte[length];
 
-            do
+            while (pos < length)
             {
                 try
                 {
-                    var receivedBytes = _socket.Receive(buffer, receivedTotal, length - receivedTotal, SocketFlags.None);
-                    if (receivedBytes > 0)
-                    {
-                        receivedTotal += receivedBytes;
-                        continue;
-                    }
-                    throw new SocketException((int)SocketError.ConnectionAborted);
+                    var ar = _socket.BeginReceive(buffer, pos, length - pos, SocketFlags.None, null, null);
+                    WaitHandle(ar);
+                    var len = _socket.EndReceive(ar);
+                    if (len == 0)
+                        throw new SocketException((int)SocketError.ConnectionAborted);
+
+                    pos += len;
                 }
                 catch (SocketException exp)
                 {
@@ -231,35 +210,28 @@ namespace SshNet
                         exp.SocketErrorCode == SocketError.IOPending ||
                         exp.SocketErrorCode == SocketError.NoBufferSpaceAvailable)
                     {
-                        // socket buffer is probably empty, wait and try again
                         Thread.Sleep(30);
                     }
                     else
-                    {
                         throw;
-                    }
                 }
-            } while (receivedTotal < length);
+            }
 
             return buffer;
         }
 
         private void SocketWrite(byte[] data)
         {
-            SocketWrite(data, 0, data.Length);
-        }
+            var pos = 0;
+            var length = data.Length;
 
-        private void SocketWrite(byte[] data, int offset, int length)
-        {
-            var totalBytesSent = 0;  // how many bytes are already sent
-            var totalBytesToSend = length;
-
-            do
+            while (pos < length)
             {
                 try
                 {
-                    totalBytesSent += _socket.Send(data, offset + totalBytesSent, totalBytesToSend - totalBytesSent,
-                        SocketFlags.None);
+                    var ar = _socket.BeginSend(data, pos, length - pos, SocketFlags.None, null, null);
+                    WaitHandle(ar);
+                    pos += _socket.EndSend(ar);
                 }
                 catch (SocketException ex)
                 {
@@ -267,13 +239,20 @@ namespace SshNet
                         ex.SocketErrorCode == SocketError.IOPending ||
                         ex.SocketErrorCode == SocketError.NoBufferSpaceAvailable)
                     {
-                        // socket buffer is probably full, wait and try again
                         Thread.Sleep(30);
                     }
                     else
-                        throw;  // any serious error occurr
+                        throw;
                 }
-            } while (totalBytesSent < totalBytesToSend);
+            }
+        }
+
+        private void WaitHandle(IAsyncResult ar)
+        {
+            if (!ar.AsyncWaitHandle.WaitOne(_timeout))
+                throw new SshConnectionException(string.Format("Socket operation has timed out after {0:F0} milliseconds.",
+                    _timeout.TotalMilliseconds),
+                    DisconnectReason.ConnectionLost);
         }
         #endregion
 
