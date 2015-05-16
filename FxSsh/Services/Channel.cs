@@ -41,7 +41,7 @@ namespace SshNet.Services
 
         public event EventHandler<byte[]> DataReceived;
         public event EventHandler EofReceived;
-        public event EventHandler Closing;
+        public event EventHandler CloseReceived;
 
         public void SendData(byte[] data)
         {
@@ -109,8 +109,8 @@ namespace SshNet.Services
         {
             ClientClosed = true;
 
-            if (Closing != null)
-                Closing(this, EventArgs.Empty);
+            if (CloseReceived != null)
+                CloseReceived(this, EventArgs.Empty);
 
             CheckBothClosed();
         }

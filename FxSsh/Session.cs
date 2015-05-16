@@ -50,7 +50,6 @@ namespace SshNet
         public string ServerVersion { get; private set; }
         public string ClientVersion { get; private set; }
         public byte[] SessionId { get; private set; }
-        public bool IsConnected { get; private set; }
         public T GetService<T>() where T : SshService
         {
             return (T)_services.FirstOrDefault(x => x is T);
@@ -91,18 +90,15 @@ namespace SshNet
 
             _socket = socket;
             _hostKey = hostKey.ToDictionary(s => s.Key, s => s.Value);
-            ServerVersion = "SSH-2.0-SshNet";
+            ServerVersion = "SSH-2.0-FxSsh";
         }
 
         public event EventHandler<EventArgs> Disconnected;
 
         public event EventHandler<SshService> ServiceRegistered;
 
-        public void EstablishConnection()
+        internal void EstablishConnection()
         {
-            if (IsConnected)
-                return;
-
             SetSocketOptions();
 
             SocketWriteProtocolVersion();

@@ -7,8 +7,8 @@
     <ProjectGuid>{E6C351AE-02D6-4145-931D-FCBCA37986C4}</ProjectGuid>
     <OutputType>Library</OutputType>
     <AppDesignerFolder>Properties</AppDesignerFolder>
-    <RootNamespace>SshNet</RootNamespace>
-    <AssemblyName>SshNet</AssemblyName>
+    <RootNamespace>FxSsh</RootNamespace>
+    <AssemblyName>FxSsh</AssemblyName>
     <TargetFrameworkVersion>v4.5.1</TargetFrameworkVersion>
     <FileAlignment>512</FileAlignment>
     <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
