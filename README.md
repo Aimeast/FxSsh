@@ -1,5 +1,5 @@
 ## FxSsh
-FxSsh is a lightwight [SSH](http://en.wikipedia.org/wiki/Secure_Shell) server side application as SSH reinforcement of [GitCandy](https://github.com/Aimeast/GitCandy). 
+FxSsh is a lightweight [SSH](http://en.wikipedia.org/wiki/Secure_Shell) server side application as SSH reinforcement of [GitCandy](https://github.com/Aimeast/GitCandy). 
 
 ---
 ### Sample code
@@ -20,10 +20,10 @@ static void server_ConnectionAccepted(object sender, Session e)
 {
     Console.WriteLine("Accepted a client.");
 
-    e.ServiceRegistered += e_ServiceRequesting;
+    e.ServiceRegistered += e_ServiceRegistered;
 }
 
-static void e_ServiceRequesting(object sender, SshService e)
+static void e_ServiceRegistered(object sender, SshService e)
 {
     var session = (Session)sender;
     Console.WriteLine("Session {0} requesting {1}.",
@@ -51,6 +51,11 @@ static void service_Userauth(object sender, UserauthArgs e)
 static void service_CommandOpened(object sender, SessionRequestedArgs e)
 {
     Console.WriteLine("Channel {0} runs command: \"{1}\".", e.Channel.ServerChannelId, e.CommandText);
+
+    var allow = true; // func(e.CommandText, e.AttachedUserauthArgs);
+
+    if (!allow)
+        return;
 
     e.Channel.DataReceived += (ss, ee) => Console.WriteLine("Channel {0} received {1} bytes.", e.Channel.ServerChannelId, ee.Length);
     e.Channel.CloseReceived += (ss, ee) =>

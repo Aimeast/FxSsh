@@ -11,12 +11,14 @@ namespace SshNet.Services
     {
         private readonly object _locker = new object();
         private readonly List<Channel> _channels = new List<Channel>();
+        private readonly UserauthArgs _auth = null;
 
         private int _serverChannelCounter = -1;
 
-        public ConnectionService(Session session)
+        public ConnectionService(Session session, UserauthArgs auth)
             : base(session)
         {
+            _auth = auth;
         }
 
         public event EventHandler<SessionRequestedArgs> CommandOpened;
@@ -119,7 +121,7 @@ namespace SshNet.Services
 
             if (CommandOpened != null)
             {
-                var args = new SessionRequestedArgs(channel, message.Command);
+                var args = new SessionRequestedArgs(channel, message.Command, _auth);
                 CommandOpened(this, args);
             }
         }

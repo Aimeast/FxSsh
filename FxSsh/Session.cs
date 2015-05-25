@@ -563,7 +563,7 @@ namespace SshNet
             }
         }
 
-        internal SshService RegisterService(string serviceName, bool byAuth = false)
+        internal SshService RegisterService(string serviceName, UserauthArgs auth = null)
         {
             SshService service = null;
             switch (serviceName)
@@ -573,8 +573,8 @@ namespace SshNet
                         service = new UserauthService(this);
                     break;
                 case "ssh-connection":
-                    if (byAuth && GetService<ConnectionService>() == null)
-                        service = new ConnectionService(this);
+                    if (auth != null && GetService<ConnectionService>() == null)
+                        service = new ConnectionService(this, auth);
                     break;
             }
             if (service != null)

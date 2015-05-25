@@ -62,16 +62,16 @@ namespace SshNet.Services
                     verifed = keyAlg.VerifyData(worker.ToByteArray(), sig);
                 }
 
+                var args = new UserauthArgs(message.KeyAlgorithmName, keyAlg.GetFingerprint(), message.PublicKey);
                 if (verifed && Userauth != null)
                 {
-                    var args = new UserauthArgs(message.KeyAlgorithmName, keyAlg.GetFingerprint(), message.PublicKey);
                     Userauth(this, args);
                     verifed = args.Result;
                 }
 
                 if (verifed)
                 {
-                    _session.RegisterService(message.ServiceName, true);
+                    _session.RegisterService(message.ServiceName, args);
                     if (Succeed != null)
                         Succeed(this, message.ServiceName);
                     _session.SendMessage(new SuccessMessage());
