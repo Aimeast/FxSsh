@@ -1,10 +1,15 @@
-﻿
+﻿using System.Diagnostics.Contracts;
+
 namespace SshNet.Services
 {
     public class SessionRequestedArgs
     {
         public SessionRequestedArgs(SessionChannel channel, string command, UserauthArgs userauthArgs)
         {
+            Contract.Requires(channel != null);
+            Contract.Requires(command != null);
+            Contract.Requires(userauthArgs != null);
+
             Channel = channel;
             CommandText = command;
             AttachedUserauthArgs = userauthArgs;

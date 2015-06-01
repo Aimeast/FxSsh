@@ -1,7 +1,9 @@
-﻿using System.Security.Cryptography;
+﻿using System.Diagnostics.Contracts;
+using System.Security.Cryptography;
 
 namespace SshNet.Algorithms
 {
+    [ContractClass(typeof(KexAlgorithmContract))]
     public abstract class KexAlgorithm
     {
         protected HashAlgorithm _hashAlgorithm;
@@ -12,6 +14,8 @@ namespace SshNet.Algorithms
 
         public byte[] ComputeHash(byte[] input)
         {
+            Contract.Requires(input != null);
+
             return _hashAlgorithm.ComputeHash(input);
         }
     }

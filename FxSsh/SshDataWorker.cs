@@ -16,6 +16,8 @@ namespace SshNet
 
         public SshDataWorker(byte[] buffer)
         {
+            Contract.Requires(buffer != null);
+
             _ms = new MemoryStream(buffer);
         }
 
@@ -55,6 +57,8 @@ namespace SshNet
 
         public void WriteMpint(byte[] data)
         {
+            Contract.Requires(data != null);
+
             if (data.Length == 1 && data[0] == 0)
             {
                 Write(new byte[4]);

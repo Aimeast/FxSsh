@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics.Contracts;
 using System.Security.Cryptography;
 
 namespace FxSsh
@@ -7,6 +8,8 @@ namespace FxSsh
     {
         public static string GetFingerprint(string sshkey)
         {
+            Contract.Requires(sshkey != null);
+
             using (var md5 = new MD5CryptoServiceProvider())
             {
                 var bytes = Convert.FromBase64String(sshkey);
@@ -17,6 +20,8 @@ namespace FxSsh
 
         private static AsymmetricAlgorithm GetAsymmetricAlgorithm(string type)
         {
+            Contract.Requires(type != null);
+
             switch (type)
             {
                 case "ssh-rsa":
@@ -30,6 +35,8 @@ namespace FxSsh
 
         public static string GeneratePrivateKey(string type)
         {
+            Contract.Requires(type != null);
+
             var alg = GetAsymmetricAlgorithm(type);
             return alg.ToXmlString(true);
         }

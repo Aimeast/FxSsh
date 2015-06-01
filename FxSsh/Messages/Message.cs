@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics.Contracts;
 
 namespace SshNet.Messages
 {
@@ -10,6 +11,8 @@ namespace SshNet.Messages
 
         public void Load(byte[] bytes)
         {
+            Contract.Requires(bytes != null);
+
             RawBytes = bytes;
             using (var worker = new SshDataWorker(bytes))
             {
@@ -35,16 +38,22 @@ namespace SshNet.Messages
 
         public virtual void LoadFrom(Message message)
         {
+            Contract.Requires(message != null);
+
             Load(message.RawBytes);
         }
 
         protected virtual void OnLoad(SshDataWorker reader)
         {
+            Contract.Requires(reader != null);
+
             throw new NotSupportedException();
         }
 
         protected virtual void OnGetPacket(SshDataWorker writer)
         {
+            Contract.Requires(writer != null);
+
             throw new NotSupportedException();
         }
     }

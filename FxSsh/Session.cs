@@ -299,6 +299,8 @@ namespace SshNet
 
         internal void SendMessage(Message message)
         {
+            Contract.Requires(message != null);
+
             var useAlg = _algorithms != null;
 
             var blockSize = (byte)(useAlg ? Math.Max(8, _algorithms.ServerEncryption.BlockBytesSize) : 8);
@@ -343,6 +345,8 @@ namespace SshNet
 
         internal bool TrySendMessage(Message message)
         {
+            Contract.Requires(message != null);
+
             try
             {
                 SendMessage(message);
@@ -488,9 +492,6 @@ namespace SshNet
 
         private string ChooseAlgorithm(string[] serverAlgorithms, string[] clientAlgorithms)
         {
-            Contract.Requires(serverAlgorithms != null);
-            Contract.Requires(clientAlgorithms != null);
-
             foreach (var client in clientAlgorithms)
                 foreach (var server in serverAlgorithms)
                     if (client == server)
@@ -565,6 +566,8 @@ namespace SshNet
 
         internal SshService RegisterService(string serviceName, UserauthArgs auth = null)
         {
+            Contract.Requires(serviceName != null);
+
             SshService service = null;
             switch (serviceName)
             {

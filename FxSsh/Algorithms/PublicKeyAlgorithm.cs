@@ -1,13 +1,17 @@
 ﻿using System;
+using System.Diagnostics.Contracts;
 using System.Security.Cryptography;
 using System.Text;
 
 namespace SshNet.Algorithms
 {
+    [ContractClass(typeof(PublicKeyAlgorithmContract))]
     public abstract class PublicKeyAlgorithm
     {
         public PublicKeyAlgorithm(string xml)
         {
+            Contract.Requires(xml != null);
+
             if (!string.IsNullOrEmpty(xml))
                 ImportKey(xml);
         }
@@ -25,6 +29,8 @@ namespace SshNet.Algorithms
 
         public byte[] GetSignature(byte[] signatureData)
         {
+            Contract.Requires(signatureData != null);
+
             using (var worker = new SshDataWorker(signatureData))
             {
                 if (worker.ReadString(Encoding.ASCII) != this.Name)
@@ -37,6 +43,8 @@ namespace SshNet.Algorithms
 
         public byte[] CreateSignatureData(byte[] data)
         {
+            Contract.Requires(data != null);
+
             using (var worker = new SshDataWorker())
             {
                 var signature = SignData(data);

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics.Contracts;
 
 namespace SshNet.Messages
 {
@@ -7,6 +8,8 @@ namespace SshNet.Messages
     {
         public MessageAttribute(string name, byte number)
         {
+            Contract.Requires(name != null);
+
             Name = name;
             Number = number;
         }

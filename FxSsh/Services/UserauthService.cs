@@ -1,6 +1,7 @@
 ﻿using SshNet.Messages;
 using SshNet.Messages.Userauth;
 using System;
+using System.Diagnostics.Contracts;
 
 namespace SshNet.Services
 {
@@ -17,6 +18,8 @@ namespace SshNet.Services
 
         internal void HandleMessageCore(UserauthServiceMessage message)
         {
+            Contract.Requires(message != null);
+
             HandleMessage((dynamic)message);
         }
 

@@ -1,5 +1,6 @@
 ﻿using SshNet.Messages.Connection;
 using System;
+using System.Diagnostics.Contracts;
 
 namespace SshNet.Services
 {
@@ -11,6 +12,8 @@ namespace SshNet.Services
             uint clientChannelId, uint clientInitialWindowSize, uint clientMaxPacketSize,
             uint serverChannelId)
         {
+            Contract.Requires(connectionService != null);
+
             _connectionService = connectionService;
 
             ClientChannelId = clientChannelId;
@@ -45,6 +48,8 @@ namespace SshNet.Services
 
         public void SendData(byte[] data)
         {
+            Contract.Requires(data != null);
+
             var msg = new ChannelDataMessage();
             msg.RecipientChannel = ClientChannelId;
 
@@ -91,6 +96,8 @@ namespace SshNet.Services
 
         internal void OnData(byte[] data)
         {
+            Contract.Requires(data != null);
+
             ServerAttemptAdjustWindow((uint)data.Length);
 
             if (DataReceived != null)

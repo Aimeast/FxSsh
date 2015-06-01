@@ -78,6 +78,9 @@ namespace SshNet
 
         public void AddHostKey(string type, string xml)
         {
+            Contract.Requires(type != null);
+            Contract.Requires(xml != null);
+
             if (!_hostKey.ContainsKey(type))
                 _hostKey.Add(type, xml);
         }

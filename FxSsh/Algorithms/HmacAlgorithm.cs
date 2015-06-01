@@ -24,6 +24,8 @@ namespace SshNet.Algorithms
 
         public byte[] ComputeHash(byte[] input)
         {
+            Contract.Requires(input != null);
+
             return _algorithm.ComputeHash(input);
         }
     }

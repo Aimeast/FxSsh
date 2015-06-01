@@ -37,7 +37,7 @@ namespace SshNet.Algorithms
             else
                 throw new ArgumentException("bitlen", "bitlen must equal 1024 or 2048");
 
-            var bytes = new byte[20]; // 20 * 8 = 160 bits
+            var bytes = new byte[80]; // 80 * 8 = 640 bits
             _rng.GetBytes(bytes);
             _x = BigInteger.Abs(new BigInteger(bytes));
         }
@@ -51,6 +51,8 @@ namespace SshNet.Algorithms
 
         public byte[] DecryptKeyExchange(byte[] keyEx)
         {
+            Contract.Requires(keyEx != null);
+
             var pvr = BytesToBigint(keyEx);
             var z = BigInteger.ModPow(pvr, _x, _p);
             var bytes = BigintToBytes(z);

@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics.Contracts;
 using System.Security.Cryptography;
 
 namespace SshNet.Algorithms
@@ -7,6 +8,8 @@ namespace SshNet.Algorithms
     {
         public HmacInfo(KeyedHashAlgorithm algorithm, int keySize)
         {
+            Contract.Requires(algorithm != null);
+
             KeySize = keySize;
             Hmac = key => new HmacAlgorithm(algorithm, keySize, key);
         }

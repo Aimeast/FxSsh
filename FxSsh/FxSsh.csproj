@@ -82,6 +82,7 @@
     <Compile Include="Algorithms\CipherInfo.cs" />
     <Compile Include="Algorithms\CipherModeEx.cs" />
     <Compile Include="Algorithms\CompressionAlgorithm.cs" />
+    <Compile Include="Algorithms\CompressionAlgorithmContract.cs" />
     <Compile Include="Algorithms\CtrModeCryptoTransform.cs" />
     <Compile Include="Algorithms\DiffieHellman.cs" />
     <Compile Include="Algorithms\DiffieHellmanGroupSha1.cs" />
@@ -90,8 +91,10 @@
     <Compile Include="Algorithms\HmacAlgorithm.cs" />
     <Compile Include="Algorithms\HmacInfo.cs" />
     <Compile Include="Algorithms\KexAlgorithm.cs" />
+    <Compile Include="Algorithms\KexAlgorithmContract.cs" />
     <Compile Include="Algorithms\NoCompression.cs" />
     <Compile Include="Algorithms\PublicKeyAlgorithm.cs" />
+    <Compile Include="Algorithms\PublicKeyAlgorithmContract.cs" />
     <Compile Include="Algorithms\RsaKey.cs" />
     <Compile Include="ChannelOpenFailureReason.cs" />
     <Compile Include="DisconnectReason.cs" />

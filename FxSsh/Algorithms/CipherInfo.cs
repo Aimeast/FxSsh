@@ -1,4 +1,6 @@
 ﻿using System;
+using System.Diagnostics.Contracts;
+using System.Linq;
 using System.Security.Cryptography;
 
 namespace SshNet.Algorithms
@@ -7,6 +9,10 @@ namespace SshNet.Algorithms
     {
         public CipherInfo(SymmetricAlgorithm algorithm, int keySize, CipherModeEx mode)
         {
+            Contract.Requires(algorithm != null);
+            Contract.Requires(algorithm.LegalKeySizes.Any(x =>
+                x.MinSize <= keySize && keySize <= x.MaxSize && keySize % x.SkipSize == 0));
+
             algorithm.KeySize = keySize;
             KeySize = algorithm.KeySize;
             BlockSize = algorithm.BlockSize;

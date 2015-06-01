@@ -2,6 +2,7 @@
 using SshNet.Messages.Connection;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.Contracts;
 using System.Linq;
 using System.Threading;
 
@@ -18,6 +19,8 @@ namespace SshNet.Services
         public ConnectionService(Session session, UserauthArgs auth)
             : base(session)
         {
+            Contract.Requires(auth != null);
+
             _auth = auth;
         }
 
@@ -25,6 +28,8 @@ namespace SshNet.Services
 
         internal void HandleMessageCore(ConnectionServiceMessage message)
         {
+            Contract.Requires(message != null);
+
             HandleMessage((dynamic)message);
         }
 

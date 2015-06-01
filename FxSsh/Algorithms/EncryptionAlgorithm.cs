@@ -1,7 +1,5 @@
-﻿using System;
-using System.ComponentModel;
+﻿using System.ComponentModel;
 using System.Diagnostics.Contracts;
-using System.IO;
 using System.Security.Cryptography;
 
 namespace SshNet.Algorithms
