@@ -95,6 +95,7 @@
     <Compile Include="Algorithms\RsaKey.cs" />
     <Compile Include="ChannelOpenFailureReason.cs" />
     <Compile Include="DisconnectReason.cs" />
+    <Compile Include="KeyUtils.cs" />
     <Compile Include="Messages\ConnectionServiceMessage.cs" />
     <Compile Include="Messages\Connection\ChannelCloseMessage.cs" />
     <Compile Include="Messages\Connection\ChannelDataMessage.cs" />

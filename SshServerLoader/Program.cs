@@ -47,7 +47,7 @@ namespace SshServerLoader
 
         static void service_Userauth(object sender, UserauthArgs e)
         {
-            Console.WriteLine("Client {0} fingerprint: {1}.", e.KeyAlgorithm, e.KeyHash);
+            Console.WriteLine("Client {0} fingerprint: {1}.", e.KeyAlgorithm, e.Fingerprint);
 
             e.Result = true;
         }
