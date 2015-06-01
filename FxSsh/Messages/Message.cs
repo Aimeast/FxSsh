@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Diagnostics.Contracts;
 
-namespace SshNet.Messages
+namespace FxSsh.Messages
 {
     public abstract class Message
     {

@@ -1,5 +1,5 @@
-﻿using SshNet;
-using SshNet.Services;
+﻿using FxSsh;
+using FxSsh.Services;
 using System;
 using System.Text;
 using System.Threading.Tasks;

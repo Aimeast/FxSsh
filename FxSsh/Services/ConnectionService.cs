@@ -1,12 +1,12 @@
-﻿using SshNet.Messages;
-using SshNet.Messages.Connection;
+﻿using FxSsh.Messages;
+using FxSsh.Messages.Connection;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Linq;
 using System.Threading;
 
-namespace SshNet.Services
+namespace FxSsh.Services
 {
     public class ConnectionService : SshService
     {

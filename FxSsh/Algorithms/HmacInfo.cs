@@ -2,7 +2,7 @@
 using System.Diagnostics.Contracts;
 using System.Security.Cryptography;
 
-namespace SshNet.Algorithms
+namespace FxSsh.Algorithms
 {
     public class HmacInfo
     {

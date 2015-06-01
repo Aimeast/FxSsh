@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Text;
 
-namespace SshNet.Messages.Connection
+namespace FxSsh.Messages.Connection
 {
     [Message("SSH_MSG_CHANNEL_OPEN", MessageNumber)]
     public class ChannelOpenMessage : ConnectionServiceMessage

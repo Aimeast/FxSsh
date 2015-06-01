@@ -3,7 +3,7 @@ using System.Diagnostics.Contracts;
 using System.Security.Cryptography;
 using System.Text;
 
-namespace SshNet.Algorithms
+namespace FxSsh.Algorithms
 {
     [ContractClass(typeof(PublicKeyAlgorithmContract))]
     public abstract class PublicKeyAlgorithm

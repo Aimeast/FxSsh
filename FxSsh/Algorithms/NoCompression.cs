@@ -1,5 +1,5 @@
 ﻿
-namespace SshNet.Algorithms
+namespace FxSsh.Algorithms
 {
     public class NoCompression : CompressionAlgorithm
     {

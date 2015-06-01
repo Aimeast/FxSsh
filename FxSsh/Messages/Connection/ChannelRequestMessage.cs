@@ -1,6 +1,6 @@
 ﻿using System.Text;
 
-namespace SshNet.Messages.Connection
+namespace FxSsh.Messages.Connection
 {
     [Message("SSH_MSG_CHANNEL_REQUEST", MessageNumber)]
     public class ChannelRequestMessage : ConnectionServiceMessage

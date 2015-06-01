@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Text;
 
-namespace SshNet.Messages.Userauth
+namespace FxSsh.Messages.Userauth
 {
     [Message("SSH_MSG_USERAUTH_REQUEST", MessageNumber)]
     public class RequestMessage : UserauthServiceMessage

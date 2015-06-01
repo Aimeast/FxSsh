@@ -2,7 +2,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace SshNet.Messages
+namespace FxSsh.Messages
 {
     [Message("SSH_MSG_KEXINIT", MessageNumber)]
     public class KeyExchangeInitMessage : Message

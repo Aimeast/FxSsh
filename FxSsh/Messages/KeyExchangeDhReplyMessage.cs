@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace SshNet.Messages
+namespace FxSsh.Messages
 {
     [Message("SSH_MSG_KEXDH_REPLY", MessageNumber)]
     public class KeyExchangeDhReplyMessage : Message

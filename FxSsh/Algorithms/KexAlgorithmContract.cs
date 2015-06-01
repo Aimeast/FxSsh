@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Diagnostics.Contracts;
 
-namespace SshNet.Algorithms
+namespace FxSsh.Algorithms
 {
     [ContractClassFor(typeof(KexAlgorithm))]
     abstract class KexAlgorithmContract : KexAlgorithm

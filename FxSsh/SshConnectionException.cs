@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace SshNet
+namespace FxSsh
 {
     public class SshConnectionException : Exception
     {

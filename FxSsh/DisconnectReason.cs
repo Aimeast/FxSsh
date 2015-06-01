@@ -1,6 +1,6 @@
 ﻿using System.ComponentModel;
 
-namespace SshNet
+namespace FxSsh
 {
     public enum DisconnectReason
     {

@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Text;
 
-namespace SshNet.Messages
+namespace FxSsh.Messages
 {
     [Message("SSH_MSG_SERVICE_REQUEST", MessageNumber)]
     public class ServiceRequestMessage : Message

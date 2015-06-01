@@ -2,7 +2,7 @@
 using System.Linq;
 using System.Text;
 
-namespace SshNet.Messages.Userauth
+namespace FxSsh.Messages.Userauth
 {
     public class PublicKeyRequestMessage : RequestMessage
     {

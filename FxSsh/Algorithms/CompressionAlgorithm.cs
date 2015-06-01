@@ -1,6 +1,6 @@
 ﻿using System.Diagnostics.Contracts;
 
-namespace SshNet.Algorithms
+namespace FxSsh.Algorithms
 {
     [ContractClass(typeof(CompressionAlgorithmContract))]
     public abstract class CompressionAlgorithm

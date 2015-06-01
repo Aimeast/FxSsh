@@ -5,7 +5,7 @@ using System.Linq;
 using System.Numerics;
 using System.Security.Cryptography;
 
-namespace SshNet.Algorithms
+namespace FxSsh.Algorithms
 {
     public class DiffieHellman : AsymmetricAlgorithm
     {

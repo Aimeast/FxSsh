@@ -1,6 +1,6 @@
 ﻿using System.Diagnostics.Contracts;
 
-namespace SshNet.Services
+namespace FxSsh.Services
 {
     public class UserauthArgs
     {

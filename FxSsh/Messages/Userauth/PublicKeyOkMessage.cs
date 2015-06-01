@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Text;
 
-namespace SshNet.Messages.Userauth
+namespace FxSsh.Messages.Userauth
 {
     [Message("SSH_MSG_USERAUTH_PK_OK", MessageNumber)]
     public class PublicKeyOkMessage : UserauthServiceMessage

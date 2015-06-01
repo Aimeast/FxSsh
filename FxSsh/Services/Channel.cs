@@ -1,8 +1,8 @@
-﻿using SshNet.Messages.Connection;
+﻿using FxSsh.Messages.Connection;
 using System;
 using System.Diagnostics.Contracts;
 
-namespace SshNet.Services
+namespace FxSsh.Services
 {
     public abstract class Channel
     {

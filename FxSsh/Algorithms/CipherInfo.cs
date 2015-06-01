@@ -3,7 +3,7 @@ using System.Diagnostics.Contracts;
 using System.Linq;
 using System.Security.Cryptography;
 
-namespace SshNet.Algorithms
+namespace FxSsh.Algorithms
 {
     public class CipherInfo
     {

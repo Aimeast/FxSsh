@@ -1,5 +1,5 @@
 ﻿
-namespace SshNet.Messages.Connection
+namespace FxSsh.Messages.Connection
 {
     public class ExitStatusMessage : ChannelRequestMessage
     {

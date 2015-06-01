@@ -1,6 +1,6 @@
-﻿using SshNet.Algorithms;
-using SshNet.Messages;
-using SshNet.Services;
+﻿using FxSsh.Algorithms;
+using FxSsh.Messages;
+using FxSsh.Services;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
@@ -10,7 +10,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 
-namespace SshNet
+namespace FxSsh
 {
     public class Session
     {

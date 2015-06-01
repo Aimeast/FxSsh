@@ -1,6 +1,6 @@
 ﻿using System.Net;
 
-namespace SshNet
+namespace FxSsh
 {
     public class StartingInfo
     {

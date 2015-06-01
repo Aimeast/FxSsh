@@ -2,7 +2,7 @@
 using System.Diagnostics.Contracts;
 using System.Text;
 
-namespace SshNet.Messages
+namespace FxSsh.Messages
 {
     [Message("SSH_MSG_DISCONNECT", MessageNumber)]
     public class DisconnectMessage : Message

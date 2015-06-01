@@ -1,6 +1,6 @@
 ﻿using System;
 
-namespace SshNet.Messages
+namespace FxSsh.Messages
 {
     [Message("SSH_MSG_NEWKEYS", MessageNumber)]
     public class NewKeysMessage : Message

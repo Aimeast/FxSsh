@@ -3,7 +3,7 @@ using System.Diagnostics.Contracts;
 using System.IO;
 using System.Text;
 
-namespace SshNet
+namespace FxSsh
 {
     public class SshDataWorker : IDisposable
     {

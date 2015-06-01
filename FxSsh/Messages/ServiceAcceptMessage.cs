@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Text;
 
-namespace SshNet.Messages
+namespace FxSsh.Messages
 {
     [Message("SSH_MSG_SERVICE_ACCEPT", MessageNumber)]
     public class ServiceAcceptMessage : Message

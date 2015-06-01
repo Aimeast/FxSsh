@@ -1,5 +1,5 @@
 ﻿
-namespace SshNet.Services
+namespace FxSsh.Services
 {
     public class SessionChannel : Channel
     {

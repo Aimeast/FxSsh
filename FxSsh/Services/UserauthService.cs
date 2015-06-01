@@ -1,9 +1,9 @@
-﻿using SshNet.Messages;
-using SshNet.Messages.Userauth;
+﻿using FxSsh.Messages;
+using FxSsh.Messages.Userauth;
 using System;
 using System.Diagnostics.Contracts;
 
-namespace SshNet.Services
+namespace FxSsh.Services
 {
     public class UserauthService : SshService
     {

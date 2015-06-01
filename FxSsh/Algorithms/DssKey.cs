@@ -1,7 +1,7 @@
 ﻿using System.Security.Cryptography;
 using System.Text;
 
-namespace SshNet.Algorithms
+namespace FxSsh.Algorithms
 {
     public class DssKey : PublicKeyAlgorithm
     {
