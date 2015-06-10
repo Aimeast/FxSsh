@@ -38,8 +38,7 @@ namespace FxSsh.Services
             switch (message.ChannelType)
             {
                 case "session":
-                    var msg = new SessionOpenMessage();
-                    msg.LoadFrom(message);
+                    var msg = Message.LoadFrom<SessionOpenMessage>(message);
                     HandleMessage(msg);
                     break;
                 default:
@@ -58,8 +57,7 @@ namespace FxSsh.Services
             switch (message.RequestType)
             {
                 case "exec":
-                    var msg = new CommandRequestMessage();
-                    msg.LoadFrom(message);
+                    var msg = Message.LoadFrom<CommandRequestMessage>(message);
                     HandleMessage(msg);
                     break;
                 default:

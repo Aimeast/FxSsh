@@ -36,11 +36,13 @@ namespace FxSsh.Messages
             }
         }
 
-        public virtual void LoadFrom(Message message)
+        public static T LoadFrom<T>(Message message) where T : Message, new()
         {
             Contract.Requires(message != null);
 
-            Load(message.RawBytes);
+            var msg = new T();
+            msg.Load(message.RawBytes);
+            return msg;
         }
 
         protected virtual void OnLoad(SshDataWorker reader)

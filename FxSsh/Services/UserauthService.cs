@@ -28,8 +28,7 @@ namespace FxSsh.Services
             switch (message.MethodName)
             {
                 case "publickey":
-                    var msg = new PublicKeyRequestMessage();
-                    msg.LoadFrom(message);
+                    var msg = Message.LoadFrom<PublicKeyRequestMessage>(message);
                     HandleMessage(msg);
                     break;
                 case "password":
