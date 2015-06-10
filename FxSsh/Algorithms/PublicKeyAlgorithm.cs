@@ -10,8 +10,6 @@ namespace FxSsh.Algorithms
     {
         public PublicKeyAlgorithm(string xml)
         {
-            Contract.Requires(xml != null);
-
             if (!string.IsNullOrEmpty(xml))
                 ImportKey(xml);
         }

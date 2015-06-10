@@ -8,6 +8,7 @@ using System.Linq;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace FxSsh
@@ -103,11 +104,10 @@ namespace FxSsh
 
             SocketWriteProtocolVersion();
             ClientVersion = SocketReadProtocolVersion();
-            var clientIdVersions = ClientVersion.Split('-')[1];
-            if (clientIdVersions != "2.0")
+            if (!Regex.IsMatch(ClientVersion, "SSH-2.0-.+"))
             {
                 throw new SshConnectionException(
-                    string.Format("Not supported for client SSH version {0}. This server only supports SSH v2.0.", clientIdVersions),
+                    string.Format("Not supported for client SSH version {0}. This server only supports SSH v2.0.", ClientVersion),
                     DisconnectReason.ProtocolVersionNotSupported);
             }
 
@@ -158,22 +158,25 @@ namespace FxSsh
         {
             // http://tools.ietf.org/html/rfc4253#section-4.2
             var buffer = new byte[255];
+            var dummy = new byte[255];
             var pos = 0;
+            var len = 0;
 
             while (pos < buffer.Length)
             {
                 var ar = _socket.BeginReceive(buffer, pos, buffer.Length - pos, SocketFlags.Peek, null, null);
                 WaitHandle(ar);
-                pos += _socket.EndReceive(ar);
+                len = _socket.EndReceive(ar);
 
-                for (var i = 10; i < pos; i++)
+                for (var i = 0; i < len; i++, pos++)
                 {
-                    if (buffer[i - 2] == CarriageReturn && buffer[i - 1] == LineFeed)
+                    if (pos > 0 && buffer[pos - 1] == CarriageReturn && buffer[pos] == LineFeed)
                     {
-                        _socket.Receive(buffer, 0, i, SocketFlags.None);
-                        return Encoding.ASCII.GetString(buffer, 0, i - 2);
+                        _socket.Receive(dummy, 0, i + 1, SocketFlags.None);
+                        return Encoding.ASCII.GetString(buffer, 0, pos - 1);
                     }
                 }
+                _socket.Receive(dummy, 0, len, SocketFlags.None);
             }
             throw new SshConnectionException("Could't read the protocal version", DisconnectReason.ProtocolError);
         }
@@ -195,8 +198,8 @@ namespace FxSsh
                     var ar = _socket.BeginReceive(buffer, pos, length - pos, SocketFlags.None, null, null);
                     WaitHandle(ar);
                     var len = _socket.EndReceive(ar);
-                    if (len == 0)
-                        throw new SocketException((int)SocketError.ConnectionAborted);
+                    if (len == 0 && _socket.Available == 0)
+                        Thread.Sleep(50);
 
                     pos += len;
                 }

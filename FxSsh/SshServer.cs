@@ -31,6 +31,7 @@ namespace FxSsh
         public StartingInfo StartingInfo { get; private set; }
 
         public event EventHandler<Session> ConnectionAccepted;
+        public event EventHandler<Exception> ExceptionRasied;
 
         public void Start()
         {
@@ -60,6 +61,9 @@ namespace FxSsh
 
                 _listenser.Stop();
 
+                _isDisposed = true;
+                _started = false;
+
                 foreach (var session in _sessions)
                 {
                     try
@@ -70,9 +74,6 @@ namespace FxSsh
                     {
                     }
                 }
-
-                _isDisposed = true;
-                _started = false;
             }
         }
 
@@ -97,7 +98,8 @@ namespace FxSsh
             }
             catch
             {
-                BeginAcceptSocket();
+                if (_started)
+                    BeginAcceptSocket();
             }
         }
 
@@ -121,19 +123,19 @@ namespace FxSsh
                     catch (SshConnectionException ex)
                     {
                         session.Disconnect(ex.DisconnectReason, ex.Message);
+                        if (ExceptionRasied != null)
+                            ExceptionRasied(this, ex);
                     }
-                    catch
+                    catch (Exception ex)
                     {
                         session.Disconnect();
+                        if (ExceptionRasied != null)
+                            ExceptionRasied(this, ex);
                     }
                 });
             }
-            catch (InvalidOperationException)
+            catch
             {
-                if (_isDisposed || !_started)
-                    return;
-
-                throw;
             }
             finally
             {

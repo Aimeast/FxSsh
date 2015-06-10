@@ -15,5 +15,10 @@ namespace FxSsh
         }
 
         public DisconnectReason DisconnectReason { get; private set; }
+
+        public override string ToString()
+        {
+            return string.Format("SSH connection disconnected bacause {0}: {1}");
+        }
     }
 }
