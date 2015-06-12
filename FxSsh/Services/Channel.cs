@@ -82,13 +82,14 @@ namespace FxSsh.Services
             _connectionService._session.SendMessage(msg);
         }
 
-        public void SendClose(uint exitCode = 0)
+        public void SendClose(uint? exitCode = null)
         {
             if (ServerClosed)
                 return;
 
             ServerClosed = true;
-            _connectionService._session.SendMessage(new ExitStatusMessage { RecipientChannel = ClientChannelId, ExitStatus = exitCode });
+            if (exitCode.HasValue)
+                _connectionService._session.SendMessage(new ExitStatusMessage { RecipientChannel = ClientChannelId, ExitStatus = exitCode.Value });
             _connectionService._session.SendMessage(new ChannelCloseMessage { RecipientChannel = ClientChannelId });
 
             CheckBothClosed();
