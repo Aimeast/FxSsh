@@ -40,5 +40,10 @@ namespace FxSsh
             var alg = GetAsymmetricAlgorithm(type);
             return alg.ToXmlString(true);
         }
+
+        public static string[] SupportedAlgorithms
+        {
+            get { return new string[] { "ssh-rsa", "ssh-dss" }; }
+        }
     }
 }
