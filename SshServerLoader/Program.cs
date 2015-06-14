@@ -1,7 +1,7 @@
 ﻿using FxSsh;
 using FxSsh.Services;
 using System;
-using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
 namespace SshServerLoader
@@ -61,14 +61,19 @@ namespace SshServerLoader
             if (!allow)
                 return;
 
-            e.Channel.DataReceived += (ss, ee) => Console.WriteLine("Channel {0} received {1} bytes.", e.Channel.ServerChannelId, ee.Length);
-            e.Channel.CloseReceived += (ss, ee) =>
-            {
-                Console.WriteLine("Client closed the channel {0}.", e.Channel.ServerChannelId);
-                e.Channel.SendClose();
-            };
-            e.Channel.SendData(Encoding.ASCII.GetBytes("Hello world!"));
-            e.Channel.SendEof();
+            var parser = new Regex(@"(?<cmd>git-receive-pack|git-upload-pack|git-upload-archive) \'/?(?<proj>.+)\.git\'");
+            var match = parser.Match(e.CommandText);
+            var command = match.Groups["cmd"].Value;
+            var project = match.Groups["proj"].Value;
+
+            var git = new GitService(command, project);
+
+            e.Channel.DataReceived += (ss, ee) => git.OnData(ee);
+            e.Channel.CloseReceived += (ss, ee) => git.OnClose();
+            git.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+            git.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
+
+            git.Start();
         }
     }
 }
