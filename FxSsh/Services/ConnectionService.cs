@@ -48,7 +48,7 @@ namespace FxSsh.Services
                         ReasonCode = ChannelOpenFailureReason.UnknownChannelType,
                         Description = string.Format("Unknown channel type: {0}.", message.ChannelType),
                     });
-                    break;
+                    throw new SshConnectionException(string.Format("Unknown channel type: {0}.", message.ChannelType));
             }
         }
 
@@ -66,7 +66,7 @@ namespace FxSsh.Services
                         {
                             RecipientChannel = FindChannelByServerId<Channel>(message.RecipientChannel).ClientChannelId
                         });
-                    break;
+                    throw new SshConnectionException(string.Format("Unknown request type: {0}.", message.RequestType));
             }
         }
 
