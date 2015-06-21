@@ -26,6 +26,15 @@ namespace FxSsh.Services
 
         public event EventHandler<SessionRequestedArgs> CommandOpened;
 
+        protected internal override void CloseService()
+        {
+            lock (_locker)
+                foreach (var channel in _channels)
+                {
+                    channel.ForceClose();
+                }
+        }
+
         internal void HandleMessageCore(ConnectionServiceMessage message)
         {
             Contract.Requires(message != null);

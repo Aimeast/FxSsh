@@ -16,6 +16,10 @@ namespace FxSsh.Services
 
         public event EventHandler<string> Succeed;
 
+        protected internal override void CloseService()
+        {
+        }
+
         internal void HandleMessageCore(UserauthServiceMessage message)
         {
             Contract.Requires(message != null);

@@ -114,10 +114,20 @@ namespace FxSsh
             var kexInitMessage = LoadKexInitMessage();
             SendMessage(kexInitMessage);
 
-            while (_socket != null && _socket.Connected)
+            try
             {
-                var message = ReceiveMessage();
-                HandleMessageCore(message);
+                while (_socket != null && _socket.Connected)
+                {
+                    var message = ReceiveMessage();
+                    HandleMessageCore(message);
+                }
+            }
+            finally
+            {
+                foreach (var service in _services)
+                {
+                    service.CloseService();
+                }
             }
         }
 
