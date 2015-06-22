@@ -5,7 +5,7 @@ namespace FxSsh.Messages
 {
     public abstract class Message
     {
-        protected abstract byte MessageType { get; }
+        public abstract byte MessageType { get; }
 
         protected byte[] RawBytes { get; set; }
 

@@ -10,7 +10,7 @@ namespace FxSsh.Messages
 
         public string ServiceName { get; private set; }
 
-        protected override byte MessageType { get { return MessageNumber; } }
+        public override byte MessageType { get { return MessageNumber; } }
 
         protected override void OnLoad(SshDataWorker reader)
         {

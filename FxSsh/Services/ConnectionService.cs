@@ -29,7 +29,7 @@ namespace FxSsh.Services
         protected internal override void CloseService()
         {
             lock (_locker)
-                foreach (var channel in _channels)
+                foreach (var channel in _channels.ToArray())
                 {
                     channel.ForceClose();
                 }

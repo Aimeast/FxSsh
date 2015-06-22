@@ -8,7 +8,7 @@ namespace FxSsh.Messages.Connection
 
         public uint RecipientChannel { get; set; }
 
-        protected override byte MessageType { get { return MessageNumber; } }
+        public override byte MessageType { get { return MessageNumber; } }
 
         protected override void OnLoad(SshDataWorker reader)
         {

@@ -7,7 +7,7 @@ namespace FxSsh.Messages
     {
         private const byte MessageNumber = 21;
 
-        protected override byte MessageType { get { return MessageNumber; } }
+        public override byte MessageType { get { return MessageNumber; } }
 
         protected override void OnLoad(SshDataWorker reader)
         {

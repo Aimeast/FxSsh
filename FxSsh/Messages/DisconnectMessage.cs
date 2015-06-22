@@ -27,7 +27,7 @@ namespace FxSsh.Messages
         public string Description { get; private set; }
         public string Language { get; private set; }
 
-        protected override byte MessageType { get { return MessageNumber; } }
+        public override byte MessageType { get { return MessageNumber; } }
 
         protected override void OnLoad(SshDataWorker reader)
         {
