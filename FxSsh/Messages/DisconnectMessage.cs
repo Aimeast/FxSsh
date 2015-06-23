@@ -33,7 +33,8 @@ namespace FxSsh.Messages
         {
             ReasonCode = (DisconnectReason)reader.ReadUInt32();
             Description = reader.ReadString(Encoding.UTF8);
-            Language = reader.ReadString(Encoding.UTF8);
+            if (reader.DataAvailable >= 4)
+                Language = reader.ReadString(Encoding.UTF8);
         }
 
         protected override void OnGetPacket(SshDataWorker writer)
