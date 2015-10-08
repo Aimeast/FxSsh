@@ -18,9 +18,9 @@ namespace FxSsh
     {
         private const byte CarriageReturn = 0x0d;
         private const byte LineFeed = 0x0a;
-        internal const int MaximumSshPacketSize = LocalChannelDataPacketSize + 3000;
+        internal const int MaximumSshPacketSize = LocalChannelDataPacketSize;
         internal const int InitialLocalWindowSize = LocalChannelDataPacketSize * 32;
-        internal const int LocalChannelDataPacketSize = 1024 * 64;
+        internal const int LocalChannelDataPacketSize = 1024 * 32;
 
         private static readonly RandomNumberGenerator _rng = new RNGCryptoServiceProvider();
         private static readonly Dictionary<byte, Type> _messagesMetadata;
@@ -165,6 +165,7 @@ namespace FxSsh
         {
             const int socketBufferSize = 2 * MaximumSshPacketSize;
             _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
+            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.DontLinger, true);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, socketBufferSize);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, socketBufferSize);
         }
@@ -227,7 +228,7 @@ namespace FxSsh
                         Thread.Sleep(30);
                     }
                     else
-                        throw;
+                        throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
                 }
             }
 
@@ -256,7 +257,7 @@ namespace FxSsh
                         Thread.Sleep(30);
                     }
                     else
-                        throw;
+                        throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
                 }
             }
         }
