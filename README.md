@@ -1,4 +1,7 @@
 ## FxSsh
+
+[![Codacy Badge](https://api.codacy.com/project/badge/Grade/a3dc0fc0154c47b7918c7ecd991dac6c)](https://www.codacy.com/app/lixd3389/FxSsh?utm_source=github.com&utm_medium=referral&utm_content=Aimeast/FxSsh&utm_campaign=badger)
+
 FxSsh is a lightweight [SSH](http://en.wikipedia.org/wiki/Secure_Shell) server side application as SSH reinforcement of [GitCandy](https://github.com/Aimeast/GitCandy). 
 
 ---
