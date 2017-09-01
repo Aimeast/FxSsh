@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Linq;
+using System.Reflection;
 using System.Threading;
 
 namespace FxSsh.Services
@@ -39,7 +40,9 @@ namespace FxSsh.Services
         {
             Contract.Requires(message != null);
 
-            HandleMessage((dynamic)message);
+            typeof(ConnectionService)
+                .GetMethod("HandleMessage", BindingFlags.NonPublic | BindingFlags.Instance, null, new[] { message.GetType() }, null)
+                .Invoke(this, new[] { message });
         }
 
         private void HandleMessage(ChannelOpenMessage message)

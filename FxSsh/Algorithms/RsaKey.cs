@@ -5,10 +5,10 @@ namespace FxSsh.Algorithms
 {
     public class RsaKey : PublicKeyAlgorithm
     {
-        protected readonly RSACryptoServiceProvider _algorithm = new RSACryptoServiceProvider();
+        private readonly RSACryptoServiceProvider _algorithm = new RSACryptoServiceProvider();
 
-        public RsaKey(string xml)
-            : base(xml)
+        public RsaKey(string key = null)
+            : base(key)
         {
         }
 
@@ -17,9 +17,14 @@ namespace FxSsh.Algorithms
             get { return "ssh-rsa"; }
         }
 
-        protected override void ImportKey(string xml)
+        public override void ImportKey(byte[] bytes)
         {
-            _algorithm.FromXmlString(xml);
+            _algorithm.ImportCspBlob(bytes);
+        }
+
+        public override byte[] ExportKey()
+        {
+            return _algorithm.ExportCspBlob(true);
         }
 
         public override void LoadKeyAndCertificatesData(byte[] data)
@@ -53,22 +58,22 @@ namespace FxSsh.Algorithms
 
         public override bool VerifyData(byte[] data, byte[] signature)
         {
-            return _algorithm.VerifyData(data, "SHA1", signature);
+            return _algorithm.VerifyData(data, signature, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
         }
 
         public override bool VerifyHash(byte[] hash, byte[] signature)
         {
-            return _algorithm.VerifyHash(hash, "SHA1", signature);
+            return _algorithm.VerifyHash(hash, signature, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
         }
 
         public override byte[] SignData(byte[] data)
         {
-            return _algorithm.SignData(data, "SHA1");
+            return _algorithm.SignData(data, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
         }
 
         public override byte[] SignHash(byte[] hash)
         {
-            return _algorithm.SignHash(hash, "SHA1");
+            return _algorithm.SignHash(hash, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
         }
     }
 }

@@ -8,17 +8,20 @@ namespace FxSsh.Algorithms
     [ContractClass(typeof(PublicKeyAlgorithmContract))]
     public abstract class PublicKeyAlgorithm
     {
-        public PublicKeyAlgorithm(string xml)
+        public PublicKeyAlgorithm(string key)
         {
-            if (!string.IsNullOrEmpty(xml))
-                ImportKey(xml);
+            if (!string.IsNullOrEmpty(key))
+            {
+                var bytes = Convert.FromBase64String(key);
+                ImportKey(bytes);
+            }
         }
 
         public abstract string Name { get; }
 
         public string GetFingerprint()
         {
-            using (var md5 = new MD5CryptoServiceProvider())
+            using (var md5 = MD5.Create())
             {
                 var bytes = md5.ComputeHash(CreateKeyAndCertificatesData());
                 return BitConverter.ToString(bytes).Replace('-', ':');
@@ -54,7 +57,9 @@ namespace FxSsh.Algorithms
             }
         }
 
-        protected abstract void ImportKey(string xml);
+        public abstract void ImportKey(byte[] bytes);
+
+        public abstract byte[] ExportKey();
 
         public abstract void LoadKeyAndCertificatesData(byte[] data);
 

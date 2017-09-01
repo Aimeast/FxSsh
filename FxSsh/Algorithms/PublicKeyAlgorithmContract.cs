@@ -16,8 +16,10 @@ namespace FxSsh.Algorithms
             get { throw new NotImplementedException(); }
         }
 
-        protected override void ImportKey(string xml)
+        public override void ImportKey(byte[] bytes)
         {
+            Contract.Requires(bytes != null);
+
             throw new NotImplementedException();
         }
 

@@ -7,8 +7,8 @@ namespace FxSsh.Algorithms
     {
         private readonly DSACryptoServiceProvider _algorithm = new DSACryptoServiceProvider();
 
-        public DssKey(string xml)
-            : base(xml)
+        public DssKey(string key = null)
+            : base(key)
         {
         }
 
@@ -17,9 +17,14 @@ namespace FxSsh.Algorithms
             get { return "ssh-dss"; }
         }
 
-        protected override void ImportKey(string xml)
+        public override void ImportKey(byte[] bytes)
         {
-            _algorithm.FromXmlString(xml);
+            _algorithm.ImportCspBlob(bytes);
+        }
+
+        public override byte[] ExportKey()
+        {
+            return _algorithm.ExportCspBlob(true);
         }
 
         public override void LoadKeyAndCertificatesData(byte[] data)

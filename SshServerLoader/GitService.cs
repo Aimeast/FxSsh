@@ -6,7 +6,6 @@ using System.Threading.Tasks;
 
 namespace SshServerLoader
 {
-
     public class GitService
     {
         private Process _process = null;
@@ -16,7 +15,7 @@ namespace SshServerLoader
         {
             var args = Path.Combine(@"F:\Dev\GitTest\", project + ".git");
 
-            _startInfo = new ProcessStartInfo(Path.Combine(@"D:\PortableGit\libexec\git-core", command + ".exe"), args)
+            _startInfo = new ProcessStartInfo(Path.Combine(@"D:\PortableGit\mingw64\libexec\git-core", command + ".exe"), args)
             {
                 CreateNoWindow = true,
                 RedirectStandardError = true,

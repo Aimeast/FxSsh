@@ -1,4 +1,5 @@
-﻿using System;
+﻿using FxSsh.Algorithms;
+using System;
 using System.Diagnostics.Contracts;
 using System.Security.Cryptography;
 
@@ -18,16 +19,16 @@ namespace FxSsh
             }
         }
 
-        private static AsymmetricAlgorithm GetAsymmetricAlgorithm(string type)
+        private static PublicKeyAlgorithm GetKeyAlgorithm(string type)
         {
             Contract.Requires(type != null);
 
             switch (type)
             {
                 case "ssh-rsa":
-                    return new RSACryptoServiceProvider();
+                    return new RsaKey();
                 case "ssh-dss":
-                    return new DSACryptoServiceProvider();
+                    return new DssKey();
                 default:
                     throw new ArgumentOutOfRangeException("type");
             }
@@ -37,8 +38,9 @@ namespace FxSsh
         {
             Contract.Requires(type != null);
 
-            var alg = GetAsymmetricAlgorithm(type);
-            return alg.ToXmlString(true);
+            var alg = GetKeyAlgorithm(type);
+            var bytes = alg.ExportKey();
+            return Convert.ToBase64String(bytes);
         }
 
         public static string[] SupportedAlgorithms
