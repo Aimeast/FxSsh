@@ -2,6 +2,11 @@
 FxSsh is a lightweight [SSH](http://en.wikipedia.org/wiki/Secure_Shell) server side application as SSH reinforcement of [GitCandy](https://github.com/Aimeast/GitCandy). 
 
 ---
+### Nuget
+[![NuGet version](https://badge.fury.io/nu/FxSsh.svg)](https://www.nuget.org/packages/FxSsh/)
+
+`PM> Install-Package FxSsh`
+
 ### Sample code
 ```cs
 static void Main(string[] args)
