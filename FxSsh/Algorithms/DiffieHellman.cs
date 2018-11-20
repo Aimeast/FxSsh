@@ -20,6 +20,10 @@ namespace FxSsh.Algorithms
         private BigInteger _g;
         private BigInteger _x;
 
+        public override string SignatureAlgorithm => throw new NotImplementedException();
+
+        public override string KeyExchangeAlgorithm => throw new NotImplementedException();
+
         public DiffieHellman(int bitlen)
         {
             Contract.Requires(bitlen == 1024 || bitlen == 2048);
@@ -72,6 +76,16 @@ namespace FxSsh.Algorithms
                 return bytes.Reverse().Skip(1).ToArray();
             }
             return bytes.Reverse().ToArray();
+        }
+
+        public override void FromXmlString(string xmlString)
+        {
+            throw new NotImplementedException();
+        }
+
+        public override string ToXmlString(bool includePrivateParameters)
+        {
+            throw new NotImplementedException();
         }
     }
 }

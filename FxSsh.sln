@@ -5,7 +5,7 @@ VisualStudioVersion = 15.0.26730.10
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "FxSsh", "FxSsh\FxSsh.csproj", "{A9EC649A-C941-41B6-AC99-39BB44B4F3F5}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SshServerLoader", "SshServerLoader\SshServerLoader.csproj", "{CCD756DE-A2EC-4638-BBDF-C20D8A3A27EE}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "SshServerLoader", "SshServerLoader\SshServerLoader.csproj", "{474309B7-C7E1-4F23-9A3F-385056B0639A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -17,10 +17,10 @@ Global
 		{A9EC649A-C941-41B6-AC99-39BB44B4F3F5}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A9EC649A-C941-41B6-AC99-39BB44B4F3F5}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A9EC649A-C941-41B6-AC99-39BB44B4F3F5}.Release|Any CPU.Build.0 = Release|Any CPU
-		{CCD756DE-A2EC-4638-BBDF-C20D8A3A27EE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
-		{CCD756DE-A2EC-4638-BBDF-C20D8A3A27EE}.Debug|Any CPU.Build.0 = Debug|Any CPU
-		{CCD756DE-A2EC-4638-BBDF-C20D8A3A27EE}.Release|Any CPU.ActiveCfg = Release|Any CPU
-		{CCD756DE-A2EC-4638-BBDF-C20D8A3A27EE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{474309B7-C7E1-4F23-9A3F-385056B0639A}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{474309B7-C7E1-4F23-9A3F-385056B0639A}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{474309B7-C7E1-4F23-9A3F-385056B0639A}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{474309B7-C7E1-4F23-9A3F-385056B0639A}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

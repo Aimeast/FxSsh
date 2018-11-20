@@ -51,12 +51,17 @@ namespace FxSsh.Services
         public void SendData(byte[] data)
         {
             Contract.Requires(data != null);
+            this.SendData(data, 0, data.Length);
+        }
+
+        public void SendData(byte[] data, int offset, int count)
+        {
+            Contract.Requires(data != null);
 
             var msg = new ChannelDataMessage();
             msg.RecipientChannel = ClientChannelId;
 
-            var total = (uint)data.Length;
-            var offset = 0L;
+            var total = (uint)count;
             byte[] buf = null;
             do
             {
@@ -76,7 +81,7 @@ namespace FxSsh.Services
 
                 ClientWindowSize -= packetSize;
                 total -= packetSize;
-                offset += packetSize;
+                offset += (int)packetSize;
             } while (total > 0);
         }
 

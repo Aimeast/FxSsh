@@ -42,14 +42,40 @@ namespace SshServerLoader
             {
                 var service = (ConnectionService)e;
                 service.CommandOpened += service_CommandOpened;
+                service.DirectTcpIpReceived += service_DirectTcpIpReceived;
             }
         }
 
         static void service_Userauth(object sender, UserauthArgs e)
         {
-            Console.WriteLine("Client {0} fingerprint: {1}.", e.KeyAlgorithm, e.Fingerprint);
+            if (e is PKUserauthArgs)
+            {
+                var pk = e as PKUserauthArgs;
+                Console.WriteLine("Client {0} fingerprint: {1}.", pk.KeyAlgorithm, pk.Fingerprint);
+            }
+            else if (e is PasswordUserauthArgs)
+            {
+                var pw = e as PasswordUserauthArgs;
+                Console.WriteLine("Client {0} password length: {1}.", pw.Username, pw.Password?.Length);
+            }
 
             e.Result = true;
+        }
+
+        static void service_DirectTcpIpReceived(object sender, DirectTcpIpRequestedArgs e)
+        {
+            Console.WriteLine($"Client {e.OriginatorIP}:{e.OriginatorPort} --> {e.TargetIP}:{e.TargetPort}");
+
+            if (e.TargetIP == e.OriginatorIP && e.TargetPort == e.OriginatorPort)
+            {
+                e.Allow = false;
+                e.DenialDescription = "loops not allowed!";
+                e.ReasonCode = ChannelOpenFailureReason.AdministrativelyProhibited;
+            }
+            else
+            {
+                e.Allow = true;
+            }
         }
 
         static void service_CommandOpened(object sender, SessionRequestedArgs e)

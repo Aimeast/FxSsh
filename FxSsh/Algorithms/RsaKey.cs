@@ -58,22 +58,22 @@ namespace FxSsh.Algorithms
 
         public override bool VerifyData(byte[] data, byte[] signature)
         {
-            return _algorithm.VerifyData(data, signature, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
+            return _algorithm.VerifyData(data, CryptoConfig.MapNameToOID("SHA1"), signature); ;//, RSASignaturePadding.Pkcs1);
         }
 
         public override bool VerifyHash(byte[] hash, byte[] signature)
         {
-            return _algorithm.VerifyHash(hash, signature, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
+            return _algorithm.VerifyHash(hash, CryptoConfig.MapNameToOID("SHA1"), signature);//, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
         }
 
         public override byte[] SignData(byte[] data)
         {
-            return _algorithm.SignData(data, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
+            return _algorithm.SignData(data, CryptoConfig.MapNameToOID("SHA1"));// HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
         }
 
         public override byte[] SignHash(byte[] hash)
         {
-            return _algorithm.SignHash(hash, HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
+            return _algorithm.SignHash(hash, CryptoConfig.MapNameToOID("SHA1"));// HashAlgorithmName.SHA1, RSASignaturePadding.Pkcs1);
         }
     }
 }

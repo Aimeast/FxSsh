@@ -59,14 +59,14 @@ namespace FxSsh
             {
                 CheckDisposed();
                 if (!_started)
-                    throw new InvalidOperationException("The server is not started.");
+                    return;
 
                 _listenser.Stop();
 
                 _isDisposed = true;
                 _started = false;
 
-                foreach (var session in _sessions)
+                foreach (var session in _sessions.ToArray())
                 {
                     try
                     {

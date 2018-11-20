@@ -1,4 +1,9 @@
 ﻿
+using System;
+using System.Net.Sockets;
+using System.Threading.Tasks;
+using FxSsh.Messages.Connection;
+
 namespace FxSsh.Services
 {
     public class SessionChannel : Channel
