@@ -69,7 +69,7 @@ namespace FxSsh.Services
                 _session.RegisterService(message.ServiceName, args);
 
                 if (Succeed != null)
-                    Succeed(this, message.ServiceName);
+                Succeed.?(this, message.ServiceName);
 
                 _session.SendMessage(new SuccessMessage());
                 return;
