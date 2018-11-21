@@ -43,7 +43,52 @@ static void e_ServiceRegistered(object sender, SshService e)
     {
         var service = (ConnectionService)e;
         service.CommandOpened += service_CommandOpened;
+        service.EnvReceived += service_EnvReceived;
+        service.PtyReceived += service_PtyReceived;
+        service.TcpForwardRequest += service_TcpForwardRequest;
+        service.TcpData += service_TcpData;
     }
+}
+
+static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
+{
+    Console.WriteLine("Received a request to forward data to {0}:{1}", e.Host, e.Port);
+
+    e.OnClientData = (byte[] data) => 
+    {
+        var dataAsStr = Encoding.UTF8.GetString(data);
+        Console.WriteLine("Received data: " + dataAsStr);
+    };
+    e.OnClientDisconnect = () =>
+    {
+        Console.WriteLine("Connection closed!");
+    };
+
+    Task.Run(() =>
+    {
+        while (!e.ClientReady())
+        {
+            Task.Delay(100).Wait();
+        }
+
+        var rand = new Random();
+        var randomValue = rand.Next();
+        e.OnServerData(Encoding.ASCII.GetBytes("OK " + randomValue));
+
+        Task.Delay(5000).Wait();
+
+        e.OnServerDisconnect();
+    });
+}
+
+static void service_PtyReceived(object sender, PtyArgs e)
+{
+    Console.WriteLine("Request to create a PTY received for terminal type {0}", e.Terminal);
+}
+
+static void service_EnvReceived(object sender, EnvironmentArgs e)
+{
+    Console.WriteLine("Received environment variable {0}:{1}", e.Name, e.Value);
 }
 
 static void service_Userauth(object sender, UserauthArgs e)

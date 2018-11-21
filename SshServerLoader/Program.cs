@@ -1,6 +1,7 @@
 ﻿using FxSsh;
 using FxSsh.Services;
 using System;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -25,6 +26,15 @@ namespace SshServerLoader
             Console.WriteLine("Accepted a client.");
 
             e.ServiceRegistered += e_ServiceRegistered;
+            e.KeysExchanged += e_KeysExchanged;
+        }
+
+        private static void e_KeysExchanged(object sender, KeyExchangeArgs e)
+        {
+            foreach (var keyExchangeAlg in e.KeyExchangeAlgorithms)
+            {
+                Console.WriteLine("Key exchange algorithm: {0}", keyExchangeAlg);
+            }
         }
 
         static void e_ServiceRegistered(object sender, SshService e)
@@ -42,7 +52,57 @@ namespace SshServerLoader
             {
                 var service = (ConnectionService)e;
                 service.CommandOpened += service_CommandOpened;
+                service.EnvReceived += service_EnvReceived;
+                service.PtyReceived += service_PtyReceived;
+                service.TcpForwardRequest += service_TcpForwardRequest;
             }
+        }
+
+        static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
+        {
+            Console.WriteLine("Received a request to forward data to {0}:{1}", e.Host, e.Port);
+
+            e.OnClientData = (byte[] data) => 
+            {
+                // write to console out, or could set to another server
+                // an exception should be throw if the data could not be sent, this
+                // will close the underlying resources
+                var dataAsStr = Encoding.UTF8.GetString(data); Console.WriteLine("Received data: " + dataAsStr);
+            };
+            e.OnClientDisconnect = () =>
+            {
+                // cleanup any resources here
+                Console.WriteLine("Connection closed!");
+            };
+
+            Task.Run(() =>
+            {
+                // You need to wait until the underlying client is ready to
+                // allow data to be sent
+                while (!e.ClientReady())
+                {
+                    Task.Delay(100).Wait();
+                }
+
+                var rand = new Random();
+                var randomValue = rand.Next();
+                e.OnServerData(Encoding.ASCII.GetBytes("OK " + randomValue));
+
+                Task.Delay(5000).Wait();
+
+                // when the server side is finished
+                e.OnServerDisconnect();
+            });
+        }
+
+        static void service_PtyReceived(object sender, PtyArgs e)
+        {
+            Console.WriteLine("Request to create a PTY received for terminal type {0}", e.Terminal);
+        }
+
+        static void service_EnvReceived(object sender, EnvironmentArgs e)
+        {
+            Console.WriteLine("Received environment variable {0}:{1}", e.Name, e.Value);
         }
 
         static void service_Userauth(object sender, UserauthArgs e)

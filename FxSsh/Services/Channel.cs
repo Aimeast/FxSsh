@@ -52,6 +52,11 @@ namespace FxSsh.Services
         {
             Contract.Requires(data != null);
 
+            if (data.Length == 0)
+            {
+                return;
+            }
+
             var msg = new ChannelDataMessage();
             msg.RecipientChannel = ClientChannelId;
 
