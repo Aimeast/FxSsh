@@ -58,22 +58,22 @@ namespace SshServerLoader
             }
         }
 
-        private static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
+        static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
         {
             Console.WriteLine("Received a request to forward data to {0}:{1}", e.Host, e.Port);
         }
 
-        private static void service_TcpData(object sender, TcpDataArgs e)
+        static void service_TcpData(object sender, TcpDataArgs e)
         {
             Console.WriteLine("Received some data to forward");
         }
 
-        private static void service_PtyReceived(object sender, PtyArgs e)
+        static void service_PtyReceived(object sender, PtyArgs e)
         {
             Console.WriteLine("Request to create a PTY received for terminal type {0}", e.Terminal);
         }
 
-        private static void service_EnvReceived(object sender, EnvironmentArgs e)
+        static void service_EnvReceived(object sender, EnvironmentArgs e)
         {
             Console.WriteLine("Received environment variable {0}:{1}", e.Name, e.Value);
         }
