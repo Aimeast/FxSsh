@@ -115,11 +115,8 @@ namespace FxSsh.Services
                     verifed = keyAlg.VerifyData(worker.ToByteArray(), sig);
                 }
 
-                    _session.RegisterService(message.ServiceName, args);
-                    if (Succeed != null)
-                {
-                    Succeed(this, message.ServiceName);
-                }
+                _session.RegisterService(message.ServiceName, args);
+                Succeed?.Invoke(this, message.ServiceName);
                 _session.SendMessage(new SuccessMessage());
             }
         }

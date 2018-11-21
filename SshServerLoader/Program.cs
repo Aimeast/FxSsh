@@ -25,6 +25,15 @@ namespace SshServerLoader
             Console.WriteLine("Accepted a client.");
 
             e.ServiceRegistered += e_ServiceRegistered;
+            e.KeysExchanged += e_KeysExchanged;
+        }
+
+        private static void e_KeysExchanged(object sender, KeyExchangeArgs e)
+        {
+            foreach (var keyExchangeAlg in e.KeyExchangeAlgorithms)
+            {
+                Console.WriteLine("Key exchange algorithm: {0}", keyExchangeAlg);
+            }
         }
 
         static void e_ServiceRegistered(object sender, SshService e)
@@ -42,7 +51,31 @@ namespace SshServerLoader
             {
                 var service = (ConnectionService)e;
                 service.CommandOpened += service_CommandOpened;
+                service.EnvReceived += service_EnvReceived;
+                service.PtyReceived += service_PtyReceived;
+                service.TcpForwardRequest += service_TcpForwardRequest;
+                service.TcpData += service_TcpData;
             }
+        }
+
+        private static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
+        {
+            Console.WriteLine("Received a request to forward data to {0}:{1}", e.Host, e.Port);
+        }
+
+        private static void service_TcpData(object sender, TcpDataArgs e)
+        {
+            Console.WriteLine("Received some data to forward");
+        }
+
+        private static void service_PtyReceived(object sender, PtyArgs e)
+        {
+            Console.WriteLine("Request to create a PTY received for terminal type {0}", e.Terminal);
+        }
+
+        private static void service_EnvReceived(object sender, EnvironmentArgs e)
+        {
+            Console.WriteLine("Received environment variable {0}:{1}", e.Name, e.Value);
         }
 
         static void service_Userauth(object sender, UserauthArgs e)
