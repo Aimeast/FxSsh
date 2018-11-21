@@ -5,7 +5,7 @@ namespace FxSsh.Messages
 {
     public class SubsystemMessage : ChannelRequestMessage
     {
-        public string Name = "";
+        public string Name { get; private set; }
 
         protected override void OnLoad(SshDataWorker reader)
         {

@@ -22,7 +22,6 @@ namespace FxSsh.Messages.Connection
             Port = reader.ReadUInt32();
             OriginatorIPAddress = reader.ReadString(Encoding.ASCII);
             OriginatorPort = reader.ReadUInt32();
-
         }
     }
 }

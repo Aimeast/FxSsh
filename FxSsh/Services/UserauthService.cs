@@ -37,11 +37,11 @@ namespace FxSsh.Services
             {
                 case "publickey":
                     var keyMsg = Message.LoadFrom<PublicKeyRequestMessage>(message);
-                    HandleMessage(keyMsg);       
+                    HandleMessage(keyMsg);
                     break;
                 case "password":
-                    var msg = Message.LoadFrom<PasswordRequestMessage>(message);
-                    HandleUserLogonMessage(msg);
+                    var pwdMsg = Message.LoadFrom<PasswordRequestMessage>(message);
+                    HandleUserLogonMessage(pwdMsg);
                     break;
                 case "hostbased":
                 case "none":
