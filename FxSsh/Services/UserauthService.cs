@@ -35,10 +35,13 @@ namespace FxSsh.Services
             switch (message.MethodName)
             {
                 case "publickey":
-                    var msg = Message.LoadFrom<PublicKeyRequestMessage>(message);
-                    HandleMessage(msg);
+                    var keyMsg = Message.LoadFrom<PublicKeyRequestMessage>(message);
+                    HandleMessage(keyMsg);
                     break;
                 case "password":
+                    var pswdMsg = Message.LoadFrom<PasswordRequestMessage>(message);
+                    HandleMessage(pswdMsg);
+                    break;
                 case "hostbased":
                 case "none":
                 default:
@@ -47,21 +50,58 @@ namespace FxSsh.Services
             }
         }
 
+        private void HandleMessage(PasswordRequestMessage message)
+        {
+            var verifed = false;
+
+            var args = new UserauthArgs(_session, message.Username, message.Password);
+            if (Userauth != null)
+            {
+                Userauth(this, args);
+                verifed = args.Result;
+            }
+
+            if (verifed)
+            {
+                _session.RegisterService(message.ServiceName, args);
+
+                Succeed?.Invoke(this, message.ServiceName);
+
+                _session.SendMessage(new SuccessMessage());
+                return;
+            }
+            else
+            {
+                _session.SendMessage(new FailureMessage());
+            }
+        }
+
         private void HandleMessage(PublicKeyRequestMessage message)
         {
             if (Session._publicKeyAlgorithms.ContainsKey(message.KeyAlgorithmName))
             {
+                var verifed = false;
+
+                var keyAlg = Session._publicKeyAlgorithms[message.KeyAlgorithmName](null);
+                keyAlg.LoadKeyAndCertificatesData(message.PublicKey);
+
+                var args = new UserauthArgs(base._session, message.Username, message.KeyAlgorithmName, keyAlg.GetFingerprint(), message.PublicKey);
+                Userauth?.Invoke(this, args);
+                verifed = args.Result;
+
+                if (!verifed)
+                {
+                    _session.SendMessage(new FailureMessage());
+                    return;
+                }
+
                 if (!message.HasSignature)
                 {
                     _session.SendMessage(new PublicKeyOkMessage { KeyAlgorithmName = message.KeyAlgorithmName, PublicKey = message.PublicKey });
                     return;
                 }
 
-                var keyAlg = Session._publicKeyAlgorithms[message.KeyAlgorithmName](null);
-                keyAlg.LoadKeyAndCertificatesData(message.PublicKey);
-
                 var sig = keyAlg.GetSignature(message.Signature);
-                var verifed = false;
 
                 using (var worker = new SshDataWorker())
                 {
@@ -71,28 +111,10 @@ namespace FxSsh.Services
                     verifed = keyAlg.VerifyData(worker.ToByteArray(), sig);
                 }
 
-                var args = new UserauthArgs(message.KeyAlgorithmName, keyAlg.GetFingerprint(), message.PublicKey);
-                if (verifed && Userauth != null)
-                {
-                    Userauth(this, args);
-                    verifed = args.Result;
-                }
-
-                if (verifed)
-                {
-                    _session.RegisterService(message.ServiceName, args);
-                    if (Succeed != null)
-                        Succeed(this, message.ServiceName);
-                    _session.SendMessage(new SuccessMessage());
-                    return;
-                }
-                else
-                {
-                    _session.SendMessage(new FailureMessage());
-                    throw new SshConnectionException("Authentication fail.", DisconnectReason.NoMoreAuthMethodsAvailable);
-                }
+                _session.RegisterService(message.ServiceName, args);
+                Succeed?.Invoke(this, message.ServiceName);
+                _session.SendMessage(new SuccessMessage());
             }
-            _session.SendMessage(new FailureMessage());
         }
     }
 }

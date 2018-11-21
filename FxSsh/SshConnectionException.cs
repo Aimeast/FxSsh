@@ -18,7 +18,7 @@ namespace FxSsh
 
         public override string ToString()
         {
-            return string.Format("SSH connection disconnected bacause {0}: {1}");
+            return string.Format("SSH connection disconnected because {0}", DisconnectReason);
         }
     }
 }

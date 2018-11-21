@@ -3,6 +3,7 @@ using FxSsh.Messages.Connection;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
+using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading;
@@ -26,6 +27,9 @@ namespace FxSsh.Services
         }
 
         public event EventHandler<SessionRequestedArgs> CommandOpened;
+        public event EventHandler<EnvironmentArgs> EnvReceived;
+        public event EventHandler<PtyArgs> PtyReceived;
+        public event EventHandler<TcpRequestArgs> TcpForwardRequest;
 
         protected internal override void CloseService()
         {
@@ -53,6 +57,14 @@ namespace FxSsh.Services
                     var msg = Message.LoadFrom<SessionOpenMessage>(message);
                     HandleMessage(msg);
                     break;
+                case "direct-tcpip":
+                    var tcpMsg = Message.LoadFrom<DirectTcpIpMessage>(message);
+                    HandleMessage(tcpMsg);
+                    break;
+                case "forwarded-tcpip":
+                    var forwardMsg = Message.LoadFrom<ForwardedTcpIpMessage>(message);
+                    HandleMessage(forwardMsg);
+                    break;
                 default:
                     _session.SendMessage(new ChannelOpenFailureMessage
                     {
@@ -64,6 +76,98 @@ namespace FxSsh.Services
             }
         }
 
+        private void HandleMessage(ShouldIgnoreMessage message)
+        {
+        }
+
+        private void HandleMessage(ForwardedTcpIpMessage message)
+        {
+            HandlePortForward(message, message.Address, message.Port, message.OriginatorIPAddress, message.OriginatorPort);
+        }
+
+        private void HandleMessage(DirectTcpIpMessage message)
+        {
+            HandlePortForward(message, message.Host, message.Port, message.OriginatorIPAddress, message.OriginatorPort);
+        }
+
+        private void HandlePortForward(ChannelOpenMessage message, string address, uint port, string originationIP, uint originatorPort)
+        {
+            var channel = new SessionChannel(
+                this,
+                message.SenderChannel,
+                message.InitialWindowSize,
+                message.MaximumPacketSize,
+                (uint)Interlocked.Increment(ref _serverChannelCounter));
+
+            var readyToAcceptData = false;
+
+            var args = new TcpRequestArgs(
+                this._session,
+                address,
+                port,
+                originationIP,
+                originatorPort,
+                () =>
+                {
+                    return readyToAcceptData;
+                },
+                (byte[] data) => 
+                {
+                    if (!channel.ClientClosed && !channel.ServerClosed)
+                    {
+                        channel.SendData(data);
+                    }
+                    else
+                    {
+                        throw new IOException("Connection closed");
+                    }
+                },
+                () => 
+                {
+                    if (!channel.ClientClosed && !channel.ServerClosed)
+                    {
+                        try
+                        {
+                            channel.SendClose();
+                        }
+                        catch
+                        {
+
+                        }
+                    }
+                }
+                );
+
+            TcpForwardRequest(this, args);
+
+            Action<object, byte[]> eventHandlerForDataReceived = (sender, data) => {
+                try
+                {
+                    args.OnClientData(data);
+                }
+                catch
+                {
+                    channel.SendClose();
+                }
+            };
+            channel.DataReceived += (o, ea) => eventHandlerForDataReceived(o, ea);
+
+            lock (_locker)
+                _channels.Add(channel);
+
+            // send SSH_MSG_CHANNEL_OPEN_CONFIRMATION
+            var msg = new ChannelOpenConfirmationMessage
+            {
+                RecipientChannel = channel.ClientChannelId,
+                SenderChannel = channel.ServerChannelId,
+                InitialWindowSize = channel.ServerInitialWindowSize,
+                MaximumPacketSize = channel.ServerMaxPacketSize
+            };
+
+            _session.SendMessage(msg);
+            readyToAcceptData = true;
+        }
+
         private void HandleMessage(ChannelRequestMessage message)
         {
             switch (message.RequestType)
@@ -71,6 +175,37 @@ namespace FxSsh.Services
                 case "exec":
                     var msg = Message.LoadFrom<CommandRequestMessage>(message);
                     HandleMessage(msg);
+                    break;
+                case "shell":
+                    var shell_msg = Message.LoadFrom<ShellRequestMessage>(message);
+                    HandleMessage(shell_msg);
+                    break;
+                case "pty-req":
+                    var pty_msg = Message.LoadFrom<PtyRequestMessage>(message);
+                    HandleMessage(pty_msg);
+                    break;
+                case "env":
+                    var env_msg = Message.LoadFrom<EnvMessage>(message);
+                    HandleMessage(env_msg);
+                    break;
+                case "subsystem":
+                    var sub_msg = Message.LoadFrom<SubsystemMessage>(message);
+                    HandleMessage(sub_msg);
+                    break;
+                case "window-change":
+                    break;
+                case "simple@putty.projects.tartarus.org":
+                    //https://tartarus.org/~simon/putty-snapshots/htmldoc/AppendixF.html
+                    if (message.WantReply)
+                    {
+                        var c = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+                        _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = c.ClientChannelId });
+                    }
+                    break;
+                case "winadj@putty.projects.tartarus.org":
+                    //https://tartarus.org/~simon/putty-snapshots/htmldoc/AppendixF.html
+                    var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+                    _session.SendMessage(new ChannelFailureMessage { RecipientChannel = channel.ClientChannelId });
                     break;
                 default:
                     if (message.WantReply)
@@ -80,6 +215,60 @@ namespace FxSsh.Services
                         });
                     throw new SshConnectionException(string.Format("Unknown request type: {0}.", message.RequestType));
             }
+        }
+
+        private void HandleMessage(ShellRequestMessage message)
+        {
+            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+
+            _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });
+
+            if (CommandOpened != null)
+            {
+                var args = new SessionRequestedArgs(channel, message.RequestType, _auth);
+                CommandOpened(this, args);
+            }
+        }
+
+        private void HandleMessage(EnvMessage message)
+        {
+            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+
+            EnvReceived?.Invoke(this, new EnvironmentArgs(channel, message.Name, message.Value, _auth));
+
+            if (message.WantReply)
+                _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });
+        }
+
+        private void HandleMessage(SubsystemMessage message)
+        {
+            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+
+            if (message.WantReply)
+                _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });
+
+            if (CommandOpened != null)
+            {
+                var args = new SessionRequestedArgs(channel, message.Name, _auth);
+                CommandOpened(this, args);
+            }
+        }
+
+        private void HandleMessage(PtyRequestMessage message)
+        {
+            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+
+            PtyReceived.Invoke(this,
+                new PtyArgs(channel,
+                    message.Terminal,
+                    message.heightPx,
+                    message.heightRows,
+                    message.widthPx,
+                    message.widthChars,
+                    message.modes, _auth));
+
+            if (message.WantReply)
+                _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });
         }
 
         private void HandleMessage(ChannelDataMessage message)

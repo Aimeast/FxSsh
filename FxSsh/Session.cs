@@ -91,22 +91,29 @@ namespace FxSsh
                                  .ToDictionary(x => x.Number, x => x.Type);
         }
 
-        public Session(Socket socket, Dictionary<string, string> hostKey)
+        public Session(Socket socket, Dictionary<string, string> hostKey, string serverBanner)
         {
             Contract.Requires(socket != null);
             Contract.Requires(hostKey != null);
 
             _socket = socket;
             _hostKey = hostKey.ToDictionary(s => s.Key, s => s.Value);
-            ServerVersion = "SSH-2.0-FxSsh";
+            ServerVersion = serverBanner;
         }
 
         public event EventHandler<EventArgs> Disconnected;
 
         public event EventHandler<SshService> ServiceRegistered;
 
+        public event EventHandler<KeyExchangeArgs> KeysExchanged;
+
         internal void EstablishConnection()
         {
+            if (!_socket.Connected)
+            {
+                return;
+            }
+
             SetSocketOptions();
 
             SocketWriteProtocolVersion();
@@ -140,6 +147,9 @@ namespace FxSsh
         public void Disconnect()
         {
             Disconnect(DisconnectReason.ByApplication, "Connection terminated by the server.");
+
+            if (Disconnected != null)
+                Disconnected(this, EventArgs.Empty);
         }
 
         public void Disconnect(DisconnectReason reason, string description)
@@ -152,7 +162,8 @@ namespace FxSsh
 
             try
             {
-                _socket.Disconnect(true);
+                _socket.Shutdown(SocketShutdown.Both);
+                _socket.Close();
                 _socket.Dispose();
             }
             catch { }
@@ -169,6 +180,7 @@ namespace FxSsh
             _socket.LingerState = new LingerOption(enable: false, seconds: 0);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, socketBufferSize);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, socketBufferSize);
+            _socket.ReceiveTimeout = (int) _timeout.TotalMilliseconds;
         }
 
         private string SocketReadProtocolVersion()
@@ -184,6 +196,11 @@ namespace FxSsh
                 var ar = _socket.BeginReceive(buffer, pos, buffer.Length - pos, SocketFlags.Peek, null, null);
                 WaitHandle(ar);
                 len = _socket.EndReceive(ar);
+
+                if (len == 0)
+                {
+                    throw new SshConnectionException("Could't read the protocal version", DisconnectReason.ProtocolError);
+                }
 
                 for (var i = 0; i < len; i++, pos++)
                 {
@@ -208,6 +225,8 @@ namespace FxSsh
             var pos = 0;
             var buffer = new byte[length];
 
+            var msSinceLastData = 0;
+
             while (pos < length)
             {
                 try
@@ -215,8 +234,25 @@ namespace FxSsh
                     var ar = _socket.BeginReceive(buffer, pos, length - pos, SocketFlags.None, null, null);
                     WaitHandle(ar);
                     var len = _socket.EndReceive(ar);
+                    if (!_socket.Connected)
+                    {
+                        throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
+                    }
+
                     if (len == 0 && _socket.Available == 0)
+                    {
+                        if (msSinceLastData >= _timeout.TotalMilliseconds)
+                        {
+                            throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
+                        }
+
+                        msSinceLastData += 50;
                         Thread.Sleep(50);
+                    }
+                    else
+                    {
+                        msSinceLastData = 0;
+                    }
 
                     pos += len;
                 }
@@ -472,6 +508,20 @@ namespace FxSsh
         private void HandleMessage(KeyExchangeInitMessage message)
         {
             ConsiderReExchange(true);
+
+            KeysExchanged?.Invoke(this, new KeyExchangeArgs(this)
+            {
+                CompressionAlgorithmsClientToServer = message.CompressionAlgorithmsClientToServer,
+                CompressionAlgorithmsServerToClient = message.CompressionAlgorithmsServerToClient,
+                EncryptionAlgorithmsClientToServer = message.EncryptionAlgorithmsClientToServer,
+                EncryptionAlgorithmsServerToClient = message.EncryptionAlgorithmsServerToClient,
+                KeyExchangeAlgorithms = message.KeyExchangeAlgorithms,
+                LanguagesClientToServer = message.LanguagesClientToServer,
+                LanguagesServerToClient = message.LanguagesServerToClient,
+                MacAlgorithmsClientToServer = message.MacAlgorithmsClientToServer,
+                MacAlgorithmsServerToClient = message.MacAlgorithmsServerToClient,
+                ServerHostKeyAlgorithms = message.ServerHostKeyAlgorithms
+            });
 
             _exchangeContext.KeyExchange = ChooseAlgorithm(_keyExchangeAlgorithms.Keys.ToArray(), message.KeyExchangeAlgorithms);
             _exchangeContext.PublicKey = ChooseAlgorithm(_publicKeyAlgorithms.Keys.ToArray(), message.ServerHostKeyAlgorithms);
