@@ -66,6 +66,7 @@ namespace SshServerLoader
         static void service_TcpData(object sender, TcpDataArgs e)
         {
             Console.WriteLine("Received some data to forward");
+            e.Response = new byte[0];
         }
 
         static void service_PtyReceived(object sender, PtyArgs e)

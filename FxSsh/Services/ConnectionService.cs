@@ -5,9 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Linq;
 using System.Reflection;
-using System.Text;
 using System.Threading;
-using FxSsh.Messages.Userauth;
 
 namespace FxSsh.Services
 {
@@ -84,9 +82,9 @@ namespace FxSsh.Services
 
         private void HandleMessage(ForwardedTcpIpMessage message)
         {
-            var args = new TcpRequestArgs(this._session, message.Address, message.Port, message.OriginatorIPAddress, message.OriginatorPort);
+            var args = new TcpRequestArgs(_session, message.Address, message.Port, message.OriginatorIPAddress, message.OriginatorPort);
 
-            TcpForwardRequest(this, args);
+            TcpForwardRequest?.Invoke(this, args);
 
             var channel = new SessionChannel(
                 this,
@@ -116,9 +114,9 @@ namespace FxSsh.Services
 
         private void HandleMessage(DirectTcpIpMessage message)
         {
-            var args = new TcpRequestArgs(this._session, message.Host, message.Port, message.OriginatorIPAddress, message.OriginatorPort);
+            var args = new TcpRequestArgs(_session, message.Host, message.Port, message.OriginatorIPAddress, message.OriginatorPort);
 
-            TcpForwardRequest(this, args);
+            TcpForwardRequest?.Invoke(this, args);
 
             var channel = new SessionChannel(
                 this,
@@ -223,11 +221,7 @@ namespace FxSsh.Services
         {
             var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
 
-            if (EnvReceived != null)
-            {
-                var args = new EnvironmentArgs(channel, message.Name, message.Value, _auth);
-                EnvReceived(this, args);
-            }
+            EnvReceived?.Invoke(this, new EnvironmentArgs(channel, message.Name, message.Value, _auth));
 
             if (message.WantReply)
                 _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });
@@ -251,11 +245,14 @@ namespace FxSsh.Services
         {
             var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
 
-            if (PtyReceived != null)
-            {
-                var args = new PtyArgs(channel, message.Terminal, message.heightPx, message.heightRows, message.widthPx, message.widthChars, message.modes, _auth);
-                PtyReceived(this, args);
-            }
+            PtyReceived.Invoke(this,
+                new PtyArgs(channel,
+                    message.Terminal,
+                    message.heightPx,
+                    message.heightRows,
+                    message.widthPx,
+                    message.widthChars,
+                    message.modes, _auth));
 
             if (message.WantReply)
                 _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });

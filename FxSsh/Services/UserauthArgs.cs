@@ -10,6 +10,7 @@ namespace FxSsh.Services
             Contract.Requires(fingerprint != null);
             Contract.Requires(key != null);
 
+            AuthMethod = "publickey";
             KeyAlgorithm = keyAlgorithm;
             Fingerprint = fingerprint;
             Key = key;
@@ -17,15 +18,18 @@ namespace FxSsh.Services
             Username = username;
         }
 
-        public UserauthArgs(Session s, string username, string password)
+        public UserauthArgs(Session session, string username, string password)
         {
             Contract.Requires(username != null);
             Contract.Requires(password != null);
 
+            AuthMethod = "password";
             Username = username;
             Password = password;
-            Session = s;
+            Session = session;
         }
+
+        public string AuthMethod { get; private set; }
         public Session Session { get; private set; }
         public string Username { get; private set; }
         public string Password { get; private set; }

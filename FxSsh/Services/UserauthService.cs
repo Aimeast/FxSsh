@@ -1,5 +1,4 @@
 ﻿using FxSsh.Messages;
-using FxSsh.Messages.Connection;
 using FxSsh.Messages.Userauth;
 using System;
 using System.Diagnostics.Contracts;
@@ -40,24 +39,22 @@ namespace FxSsh.Services
                     HandleMessage(keyMsg);
                     break;
                 case "password":
-                    var pwdMsg = Message.LoadFrom<PasswordRequestMessage>(message);
-                    HandleUserLogonMessage(pwdMsg);
+                    var pswdMsg = Message.LoadFrom<PasswordRequestMessage>(message);
+                    HandleMessage(pswdMsg);
                     break;
                 case "hostbased":
                 case "none":
-                    _session.SendMessage(new FailureMessage());
-                    break;
                 default:
                     _session.SendMessage(new FailureMessage());
                     break;
             }
         }
 
-        private void HandleUserLogonMessage(PasswordRequestMessage message)
+        private void HandleMessage(PasswordRequestMessage message)
         {
             var verifed = false;
 
-            var args = new UserauthArgs(base._session, message.Username, message.Password);
+            var args = new UserauthArgs(_session, message.Username, message.Password);
             if (Userauth != null)
             {
                 Userauth(this, args);
@@ -68,8 +65,7 @@ namespace FxSsh.Services
             {
                 _session.RegisterService(message.ServiceName, args);
 
-                if (Succeed != null)
-                Succeed.?(this, message.ServiceName);
+                Succeed?.Invoke(this, message.ServiceName);
 
                 _session.SendMessage(new SuccessMessage());
                 return;
