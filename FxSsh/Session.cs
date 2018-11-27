@@ -166,7 +166,7 @@ namespace FxSsh
         {
             const int socketBufferSize = 2 * MaximumSshPacketSize;
             _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
-            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.DontLinger, true);
+            _socket.LingerState = new LingerOption(enable: false, seconds: 0);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, socketBufferSize);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, socketBufferSize);
         }
