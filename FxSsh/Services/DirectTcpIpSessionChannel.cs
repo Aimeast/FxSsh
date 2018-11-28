@@ -23,6 +23,7 @@ namespace FxSsh.Services
 
         private void DirectTcpIpSessionChannel_CloseReceived(object sender, EventArgs e)
         {
+            base.SendClose(0);
             cancel?.Cancel();
             cl?.Close();
             cl = null;
