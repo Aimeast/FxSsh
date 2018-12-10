@@ -1,6 +1,7 @@
 ﻿using FxSsh;
 using FxSsh.Services;
 using System;
+using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -54,19 +55,44 @@ namespace SshServerLoader
                 service.EnvReceived += service_EnvReceived;
                 service.PtyReceived += service_PtyReceived;
                 service.TcpForwardRequest += service_TcpForwardRequest;
-                service.TcpData += service_TcpData;
             }
         }
 
         static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
         {
             Console.WriteLine("Received a request to forward data to {0}:{1}", e.Host, e.Port);
-        }
 
-        static void service_TcpData(object sender, TcpDataArgs e)
-        {
-            Console.WriteLine("Received some data to forward");
-            e.Response = new byte[0];
+            e.OnClientData = (byte[] data) => 
+            {
+                // write to console out, or could set to another server
+                // an exception should be throw if the data could not be sent, this
+                // will close the underlying resources
+                var dataAsStr = Encoding.UTF8.GetString(data); Console.WriteLine("Received data: " + dataAsStr);
+            };
+            e.OnClientDisconnect = () =>
+            {
+                // cleanup any resources here
+                Console.WriteLine("Connection closed!");
+            };
+
+            Task.Run(() =>
+            {
+                // You need to wait until the underlying client is ready to
+                // allow data to be sent
+                while (!e.ClientReady())
+                {
+                    Task.Delay(100).Wait();
+                }
+
+                var rand = new Random();
+                var randomValue = rand.Next();
+                e.OnServerData(Encoding.ASCII.GetBytes("OK " + randomValue));
+
+                Task.Delay(5000).Wait();
+
+                // when the server side is finished
+                e.OnServerDisconnect();
+            });
         }
 
         static void service_PtyReceived(object sender, PtyArgs e)
