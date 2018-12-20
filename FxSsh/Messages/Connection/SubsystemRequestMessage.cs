@@ -3,7 +3,7 @@ using System.Text;
 
 namespace FxSsh.Messages
 {
-    public class SubsystemMessage : ChannelRequestMessage
+    public class SubsystemRequestMessage : ChannelRequestMessage
     {
         public string Name { get; private set; }
 

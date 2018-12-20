@@ -1,7 +1,7 @@
 ﻿using FxSsh;
 using FxSsh.Services;
+using MiniTerm;
 using System;
-using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -62,37 +62,17 @@ namespace SshServerLoader
         {
             Console.WriteLine("Received a request to forward data to {0}:{1}", e.Host, e.Port);
 
-            e.OnClientData = (byte[] data) => 
-            {
-                // write to console out, or could set to another server
-                // an exception should be throw if the data could not be sent, this
-                // will close the underlying resources
-                var dataAsStr = Encoding.UTF8.GetString(data); Console.WriteLine("Received data: " + dataAsStr);
-            };
-            e.OnClientDisconnect = () =>
-            {
-                // cleanup any resources here
-                Console.WriteLine("Connection closed!");
-            };
+            var allow = true;  // func(e.Host, e.Port, e.AttachedUserauthArgs);
 
-            Task.Run(() =>
-            {
-                // You need to wait until the underlying client is ready to
-                // allow data to be sent
-                while (!e.ClientReady())
-                {
-                    Task.Delay(100).Wait();
-                }
+            if (!allow)
+                return;
 
-                var rand = new Random();
-                var randomValue = rand.Next();
-                e.OnServerData(Encoding.ASCII.GetBytes("OK " + randomValue));
-
-                Task.Delay(5000).Wait();
-
-                // when the server side is finished
-                e.OnServerDisconnect();
-            });
+            var tcp = new TcpForwardService(e.Host, e.Port, e.OriginatorIP, e.OriginatorPort);
+            e.Channel.DataReceived += (ss, ee) => tcp.OnData(ee);
+            e.Channel.CloseReceived += (ss, ee) => tcp.OnClose();
+            tcp.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+            tcp.CloseReceived += (ss, ee) => e.Channel.SendClose();
+            tcp.Start();
         }
 
         static void service_PtyReceived(object sender, PtyArgs e)
@@ -112,28 +92,47 @@ namespace SshServerLoader
             e.Result = true;
         }
 
-        static void service_CommandOpened(object sender, SessionRequestedArgs e)
+        static void service_CommandOpened(object sender, CommandRequestedArgs e)
         {
-            Console.WriteLine("Channel {0} runs command: \"{1}\".", e.Channel.ServerChannelId, e.CommandText);
+            Console.WriteLine($"Channel {e.Channel.ServerChannelId} runs {e.ShellType}: \"{e.CommandText}\".");
 
-            var allow = true; // func(e.CommandText, e.AttachedUserauthArgs);
+            var allow = true;  // func(e.ShellType, e.CommandText, e.AttachedUserauthArgs);
 
             if (!allow)
                 return;
 
-            var parser = new Regex(@"(?<cmd>git-receive-pack|git-upload-pack|git-upload-archive) \'/?(?<proj>.+)\.git\'");
-            var match = parser.Match(e.CommandText);
-            var command = match.Groups["cmd"].Value;
-            var project = match.Groups["proj"].Value;
+            if (e.ShellType == "shell")
+            {
+                // requirements: Windows 10 RedStone 5, 1809
+                var terminal = new Terminal("cmd.exe");
 
-            var git = new GitService(command, project);
+                e.Channel.DataReceived += (ss, ee) => terminal.OnInput(ee);
+                e.Channel.CloseReceived += (ss, ee) => terminal.OnClose();
+                terminal.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+                terminal.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
 
-            e.Channel.DataReceived += (ss, ee) => git.OnData(ee);
-            e.Channel.CloseReceived += (ss, ee) => git.OnClose();
-            git.DataReceived += (ss, ee) => e.Channel.SendData(ee);
-            git.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
+                terminal.Run();
+            }
+            else if (e.ShellType == "exec")
+            {
+                var parser = new Regex(@"(?<cmd>git-receive-pack|git-upload-pack|git-upload-archive) \'/?(?<proj>.+)\.git\'");
+                var match = parser.Match(e.CommandText);
+                var command = match.Groups["cmd"].Value;
+                var project = match.Groups["proj"].Value;
 
-            git.Start();
+                var git = new GitService(command, project);
+
+                e.Channel.DataReceived += (ss, ee) => git.OnData(ee);
+                e.Channel.CloseReceived += (ss, ee) => git.OnClose();
+                git.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+                git.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
+
+                git.Start();
+            }
+            else if (e.ShellType == "subsystem")
+            {
+
+            }
         }
     }
 }
