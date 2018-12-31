@@ -9,6 +9,8 @@ namespace SshServerLoader
 {
     class Program
     {
+        static int windowWidth, windowHeight;
+
         static void Main(string[] args)
         {
             var server = new SshServer();
@@ -78,6 +80,8 @@ namespace SshServerLoader
         static void service_PtyReceived(object sender, PtyArgs e)
         {
             Console.WriteLine("Request to create a PTY received for terminal type {0}", e.Terminal);
+            windowWidth = (int)e.WidthChars;
+            windowHeight = (int)e.HeightRows;
         }
 
         static void service_EnvReceived(object sender, EnvironmentArgs e)
@@ -104,7 +108,7 @@ namespace SshServerLoader
             if (e.ShellType == "shell")
             {
                 // requirements: Windows 10 RedStone 5, 1809
-                var terminal = new Terminal("cmd.exe");
+                var terminal = new Terminal("cmd.exe", windowWidth, windowHeight);
 
                 e.Channel.DataReceived += (ss, ee) => terminal.OnInput(ee);
                 e.Channel.CloseReceived += (ss, ee) => terminal.OnClose();

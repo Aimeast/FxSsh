@@ -2,10 +2,8 @@
 using System;
 using System.IO;
 using System.Linq;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using static MiniTerm.Native.ConsoleApi;
 
 namespace MiniTerm
 {
@@ -22,34 +20,14 @@ namespace MiniTerm
         private FileStream writer;
         private FileStream reader;
 
-        public Terminal(string command)
+        public Terminal(string command, int windowWidth, int windowHeight)
         {
-            EnableVirtualTerminalSequenceProcessing();
-
             inputPipe = new PseudoConsolePipe();
             outputPipe = new PseudoConsolePipe();
-            pseudoConsole = PseudoConsole.Create(inputPipe.ReadSide, outputPipe.WriteSide, (short)Console.WindowWidth, (short)Console.WindowHeight);
+            pseudoConsole = PseudoConsole.Create(inputPipe.ReadSide, outputPipe.WriteSide, windowWidth, windowHeight);
             process = ProcessFactory.Start(command, PseudoConsole.PseudoConsoleThreadAttribute, pseudoConsole.Handle);
             writer = new FileStream(inputPipe.WriteSide, FileAccess.Write);
             reader = new FileStream(outputPipe.ReadSide, FileAccess.Read);
-        }
-
-        /// <summary>
-        /// Newer versions of the windows console support interpreting virtual terminal sequences, we just have to opt-in
-        /// </summary>
-        private static void EnableVirtualTerminalSequenceProcessing()
-        {
-            var hStdOut = GetStdHandle(STD_OUTPUT_HANDLE);
-            if (!GetConsoleMode(hStdOut, out uint outConsoleMode))
-            {
-                throw new InvalidOperationException("Could not get console mode");
-            }
-
-            outConsoleMode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING | DISABLE_NEWLINE_AUTO_RETURN;
-            if (!SetConsoleMode(hStdOut, outConsoleMode))
-            {
-                throw new InvalidOperationException("Could not enable virtual terminal processing");
-            }
         }
 
         public event EventHandler<byte[]> DataReceived;
@@ -65,8 +43,10 @@ namespace MiniTerm
             // copy all pseudoconsole output to stdout
             Task.Run(() =>
             {
+                var proc = System.Diagnostics.Process.GetProcessById(process.ProcessInfo.dwProcessId);
+
                 var buf = new byte[1024];
-                while (true)
+                while (!proc.HasExited)
                 {
                     var length = reader.Read(buf, 0, buf.Length);
                     if (length == 0)
