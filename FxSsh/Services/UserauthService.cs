@@ -2,11 +2,10 @@
 using FxSsh.Messages.Userauth;
 using System;
 using System.Diagnostics.Contracts;
-using System.Reflection;
 
 namespace FxSsh.Services
 {
-    public class UserauthService : SshService
+    public class UserauthService : SshService, IDynamicInvoker
     {
         public UserauthService(Session session)
             : base(session)
@@ -25,9 +24,7 @@ namespace FxSsh.Services
         {
             Contract.Requires(message != null);
 
-            typeof(UserauthService)
-                .GetMethod("HandleMessage", BindingFlags.NonPublic | BindingFlags.Instance, null, new[] { message.GetType() }, null)
-                .Invoke(this, new[] { message });
+            this.InvokeHandleMessage(message);
         }
 
         private void HandleMessage(RequestMessage message)

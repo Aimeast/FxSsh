@@ -7,7 +7,6 @@ using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Linq;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -15,7 +14,7 @@ using System.Threading;
 
 namespace FxSsh
 {
-    public class Session
+    public class Session : IDynamicInvoker
     {
         private const byte CarriageReturn = 0x0d;
         private const byte LineFeed = 0x0a;
@@ -180,7 +179,7 @@ namespace FxSsh
             _socket.LingerState = new LingerOption(enable: false, seconds: 0);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, socketBufferSize);
             _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, socketBufferSize);
-            _socket.ReceiveTimeout = (int) _timeout.TotalMilliseconds;
+            _socket.ReceiveTimeout = (int)_timeout.TotalMilliseconds;
         }
 
         private string SocketReadProtocolVersion()
@@ -495,9 +494,7 @@ namespace FxSsh
         #region Handle messages
         private void HandleMessageCore(Message message)
         {
-            typeof(Session)
-                .GetMethod("HandleMessage", BindingFlags.NonPublic | BindingFlags.Instance, null, new[] { message.GetType() }, null)
-                .Invoke(this, new[] { message });
+            this.InvokeHandleMessage(message);
         }
 
         private void HandleMessage(DisconnectMessage message)

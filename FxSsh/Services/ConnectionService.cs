@@ -4,12 +4,11 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Linq;
-using System.Reflection;
 using System.Threading;
 
 namespace FxSsh.Services
 {
-    public class ConnectionService : SshService
+    public class ConnectionService : SshService, IDynamicInvoker
     {
         private readonly object _locker = new object();
         private readonly List<Channel> _channels = new List<Channel>();
@@ -43,9 +42,7 @@ namespace FxSsh.Services
         {
             Contract.Requires(message != null);
 
-            typeof(ConnectionService)
-                .GetMethod("HandleMessage", BindingFlags.NonPublic | BindingFlags.Instance, null, new[] { message.GetType() }, null)
-                .Invoke(this, new[] { message });
+            this.InvokeHandleMessage(message);
         }
 
         private void HandleMessage(ChannelOpenMessage message)
