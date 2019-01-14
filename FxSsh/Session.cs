@@ -371,7 +371,8 @@ namespace FxSsh
             }
 
             _hasBlockedMessagesWaitHandle.WaitOne();
-            SendMessageInternal(message);
+            lock (_locker)
+                SendMessageInternal(message);
         }
 
         private void SendMessageInternal(Message message)

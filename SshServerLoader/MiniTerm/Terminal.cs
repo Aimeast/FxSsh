@@ -37,7 +37,6 @@ namespace MiniTerm
         /// Start the psuedoconsole and run the process as shown in 
         /// https://docs.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session#creating-the-pseudoconsole
         /// </summary>
-        /// <param name="command">the command to run, e.g. cmd.exe</param>
         public void Run()
         {
             // copy all pseudoconsole output to stdout

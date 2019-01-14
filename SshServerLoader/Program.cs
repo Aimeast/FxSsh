@@ -108,6 +108,7 @@ namespace SshServerLoader
             if (e.ShellType == "shell")
             {
                 // requirements: Windows 10 RedStone 5, 1809
+                // also, you can call powershell.exe
                 var terminal = new Terminal("cmd.exe", windowWidth, windowHeight);
 
                 e.Channel.DataReceived += (ss, ee) => terminal.OnInput(ee);
@@ -135,7 +136,7 @@ namespace SshServerLoader
             }
             else if (e.ShellType == "subsystem")
             {
-
+                // do something more
             }
         }
     }
