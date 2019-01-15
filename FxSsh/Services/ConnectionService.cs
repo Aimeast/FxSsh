@@ -163,7 +163,7 @@ namespace FxSsh.Services
         {
             var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
 
-            PtyReceived.Invoke(this,
+            PtyReceived?.Invoke(this,
                 new PtyArgs(channel,
                     message.Terminal,
                     message.heightPx,
