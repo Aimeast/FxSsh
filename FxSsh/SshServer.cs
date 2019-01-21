@@ -66,7 +66,7 @@ namespace FxSsh
                 _isDisposed = true;
                 _started = false;
 
-                foreach (var session in _sessions)
+                foreach (var session in _sessions.ToArray())
                 {
                     try
                     {
