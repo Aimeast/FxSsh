@@ -131,7 +131,10 @@ namespace FxSsh
                 while (_socket != null && _socket.Connected)
                 {
                     var message = ReceiveMessage();
-                    HandleMessageCore(message);
+                    if (message is UnknownMessage unknownMessage)
+                        SendMessage(unknownMessage.MakeUnimplementedMessage());
+                    else
+                        HandleMessageCore(message);
                 }
             }
             finally
@@ -143,15 +146,7 @@ namespace FxSsh
             }
         }
 
-        public void Disconnect()
-        {
-            Disconnect(DisconnectReason.ByApplication, "Connection terminated by the server.");
-
-            if (Disconnected != null)
-                Disconnected(this, EventArgs.Empty);
-        }
-
-        public void Disconnect(DisconnectReason reason, string description)
+        public void Disconnect(DisconnectReason reason = DisconnectReason.ByApplication, string description = "Connection terminated by the server.")
         {
             if (reason == DisconnectReason.ByApplication)
             {
@@ -343,7 +338,7 @@ namespace FxSsh
             var implemented = _messagesMetadata.ContainsKey(typeNumber);
             var message = implemented
                 ? (Message)Activator.CreateInstance(_messagesMetadata[typeNumber])
-                : new UnimplementedMessage { SequenceNumber = _inboundPacketSequence, UnimplementedMessageType = typeNumber };
+                : new UnknownMessage { SequenceNumber = _inboundPacketSequence, UnknownMessageType = typeNumber };
 
             if (implemented)
                 message.Load(data);
@@ -599,7 +594,7 @@ namespace FxSsh
 
         private void HandleMessage(UnimplementedMessage message)
         {
-            SendMessage(message);
+            // Nothing to do here
         }
 
         private void HandleMessage(ServiceRequestMessage message)
