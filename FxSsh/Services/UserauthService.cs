@@ -108,6 +108,12 @@ namespace FxSsh.Services
                     verifed = keyAlg.VerifyData(worker.ToByteArray(), sig);
                 }
 
+                if (!verifed)
+                {
+                    _session.SendMessage(new FailureMessage());
+                    return;
+                }
+
                 _session.RegisterService(message.ServiceName, args);
                 Succeed?.Invoke(this, message.ServiceName);
                 _session.SendMessage(new SuccessMessage());
