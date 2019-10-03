@@ -139,6 +139,9 @@ namespace FxSsh.Services
                     var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
                     _session.SendMessage(new ChannelFailureMessage { RecipientChannel = channel.ClientChannelId });
                     break;
+                case "auth-agent-req@openssh.com":
+                    // https://github.com/openssh/openssh-portable/blob/V_8_0_P1/session.c#L2225
+                    break;
                 default:
                     if (message.WantReply)
                         _session.SendMessage(new ChannelFailureMessage

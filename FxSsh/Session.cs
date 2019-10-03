@@ -203,6 +203,11 @@ namespace FxSsh
                         _socket.Receive(dummy, 0, i + 1, SocketFlags.None);
                         return Encoding.ASCII.GetString(buffer, 0, pos - 1);
                     }
+                    else if (pos > 0 && buffer[pos] == LineFeed) // Non-RFC case
+                    {
+                        _socket.Receive(dummy, 0, i + 1, SocketFlags.None);
+                        return Encoding.ASCII.GetString(buffer, 0, pos);
+                    }
                 }
                 _socket.Receive(dummy, 0, len, SocketFlags.None);
             }
