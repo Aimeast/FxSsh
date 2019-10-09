@@ -1,10 +1,12 @@
 ﻿using FxSsh.Messages;
 using FxSsh.Messages.Connection;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace FxSsh.Services
 {
@@ -13,6 +15,9 @@ namespace FxSsh.Services
         private readonly object _locker = new object();
         private readonly List<Channel> _channels = new List<Channel>();
         private readonly UserauthArgs _auth = null;
+        private readonly BlockingCollection<ConnectionServiceMessage> _messageQueue =
+            new BlockingCollection<ConnectionServiceMessage>(new ConcurrentQueue<ConnectionServiceMessage>());
+        private readonly CancellationTokenSource _messageCts = new CancellationTokenSource();
 
         private int _serverChannelCounter = -1;
 
@@ -22,6 +27,8 @@ namespace FxSsh.Services
             Contract.Requires(auth != null);
 
             _auth = auth;
+
+            Task.Run(MessageLoop);
         }
 
         public event EventHandler<CommandRequestedArgs> CommandOpened;
@@ -31,18 +38,40 @@ namespace FxSsh.Services
 
         protected internal override void CloseService()
         {
+            _messageCts.Cancel();
+
             lock (_locker)
+            {
                 foreach (var channel in _channels.ToArray())
                 {
                     channel.ForceClose();
                 }
+            }
         }
 
         internal void HandleMessageCore(ConnectionServiceMessage message)
         {
             Contract.Requires(message != null);
 
-            this.InvokeHandleMessage(message);
+            if (message is ChannelWindowAdjustMessage)
+                this.InvokeHandleMessage(message);
+            else
+                _messageQueue.Add(message);
+        }
+
+        private void MessageLoop()
+        {
+            try
+            {
+                while (true)
+                {
+                    var message = _messageQueue.Take(_messageCts.Token);
+                    this.InvokeHandleMessage(message);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+            }
         }
 
         private void HandleMessage(ChannelOpenMessage message)
