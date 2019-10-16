@@ -35,6 +35,7 @@ namespace FxSsh.Services
         public event EventHandler<EnvironmentArgs> EnvReceived;
         public event EventHandler<PtyArgs> PtyReceived;
         public event EventHandler<TcpRequestArgs> TcpForwardRequest;
+        public event EventHandler<WindowChangeArgs> WindowChange;
 
         protected internal override void CloseService()
         {
@@ -154,6 +155,8 @@ namespace FxSsh.Services
                     HandleMessage(sub_msg);
                     break;
                 case "window-change":
+                    var window_change_msg = Message.LoadFrom<WindowChangeMessage>(message);
+                    HandleMessage(window_change_msg);
                     break;
                 case "simple@putty.projects.tartarus.org":
                     //https://tartarus.org/~simon/putty-snapshots/htmldoc/AppendixF.html
@@ -289,6 +292,13 @@ namespace FxSsh.Services
                 _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });
 
             CommandOpened?.Invoke(this, new CommandRequestedArgs(channel, "subsystem", message.Name, _auth));
+        }
+
+        private void HandleMessage(WindowChangeMessage message)
+        {
+            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+
+            WindowChange?.Invoke(this, new WindowChangeArgs(channel, message.WidthColumns, message.HeightRows, message.WidthPixels, message.HeightPixels));
         }
 
         private T FindChannelByClientId<T>(uint id) where T : Channel

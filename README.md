@@ -57,7 +57,13 @@ static void e_ServiceRegistered(object sender, SshService e)
         service.EnvReceived += service_EnvReceived;
         service.PtyReceived += service_PtyReceived;
         service.TcpForwardRequest += service_TcpForwardRequest;
+        service.WindowChange += Service_WindowChange;
     }
+}
+
+static void Service_WindowChange(object sender, WindowChangeArgs e)
+{
+    // DEMO MiniTerm not support change window size
 }
 
 static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
