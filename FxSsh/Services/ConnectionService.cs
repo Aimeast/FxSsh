@@ -34,6 +34,7 @@ namespace FxSsh.Services
         public event EventHandler<CommandRequestedArgs> CommandOpened;
         public event EventHandler<EnvironmentArgs> EnvReceived;
         public event EventHandler<PtyArgs> PtyReceived;
+        public event EventHandler<WindowResizedArgs> WindowResized;
         public event EventHandler<TcpRequestArgs> TcpForwardRequest;
 
         protected internal override void CloseService()
@@ -154,6 +155,8 @@ namespace FxSsh.Services
                     HandleMessage(sub_msg);
                     break;
                 case "window-change":
+                    var resize_msg = Message.LoadFrom<WindowChangeMessage>(message);
+                    HandleMessage(resize_msg);
                     break;
                 case "simple@putty.projects.tartarus.org":
                     //https://tartarus.org/~simon/putty-snapshots/htmldoc/AppendixF.html
@@ -203,6 +206,21 @@ namespace FxSsh.Services
                     message.widthPx,
                     message.widthChars,
                     message.modes, _auth));
+
+            if (message.WantReply)
+                _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });
+        }
+
+        private void HandleMessage(WindowChangeMessage message)
+        {
+            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+
+            WindowResized?.Invoke(this,
+                new WindowResizedArgs(channel,
+                    message.heightPx,
+                    message.heightRows,
+                    message.widthPx,
+                    message.widthChars, _auth));
 
             if (message.WantReply)
                 _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });

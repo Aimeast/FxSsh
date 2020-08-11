@@ -57,7 +57,13 @@ namespace SshServerLoader
                 service.EnvReceived += service_EnvReceived;
                 service.PtyReceived += service_PtyReceived;
                 service.TcpForwardRequest += service_TcpForwardRequest;
+                service.WindowResized += service_WindowResized;
             }
+        }
+
+        private static void service_WindowResized(object sender, WindowResizedArgs e)
+        {
+            Console.WriteLine("Received a window resize notification: {0}x{1} chars", e.WidthChars, e.HeightRows);
         }
 
         static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
