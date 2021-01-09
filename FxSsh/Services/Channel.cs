@@ -95,7 +95,7 @@ namespace FxSsh.Services
             _connectionService._session.SendMessage(msg);
         }
 
-        public void SendClose(uint? exitCode = null)
+        public void SendClose(uint? exitCode = null, bool forceClose = true)
         {
             if (ServerClosed)
                 return;
@@ -105,7 +105,10 @@ namespace FxSsh.Services
                 _connectionService._session.SendMessage(new ExitStatusMessage { RecipientChannel = ClientChannelId, ExitStatus = exitCode.Value });
             _connectionService._session.SendMessage(new ChannelCloseMessage { RecipientChannel = ClientChannelId });
 
-            CheckBothClosed();
+            if (forceClose)
+            {
+                CheckBothClosed();
+            }
         }
 
         internal void OnData(byte[] data)
