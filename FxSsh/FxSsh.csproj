@@ -4,12 +4,12 @@
     <TargetFramework>netstandard2.0</TargetFramework>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <Authors>Aimeast</Authors>
-    <PackageLicenseUrl>https://github.com/Aimeast/FxSsh/blob/master/LICENSE.md</PackageLicenseUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/Aimeast/FxSsh</RepositoryUrl>
     <PackageTags>ssh,ssh-reinforcement,ssh-server,csharp,dotnet-core</PackageTags>
     <Description>FxSsh is a lightweight SSH server side application as SSH reinforcement of GitCandy. http://gitcandy.com</Description>
-    <Version>1.1.0</Version>
-    <AssemblyVersion>1.1.0.0</AssemblyVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>FxSsh.snk</AssemblyOriginatorKeyFile>
   </PropertyGroup>
