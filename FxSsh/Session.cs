@@ -64,6 +64,9 @@ namespace FxSsh
 
         static Session()
         {
+            _keyExchangeAlgorithms.Add("diffie-hellman-group18-sha512", () => new DiffieHellmanGroupSha512(new DiffieHellman(8192)));
+            _keyExchangeAlgorithms.Add("diffie-hellman-group16-sha512", () => new DiffieHellmanGroupSha512(new DiffieHellman(4096)));
+            _keyExchangeAlgorithms.Add("diffie-hellman-group14-sha256", () => new DiffieHellmanGroupSha256(new DiffieHellman(2048)));
             _keyExchangeAlgorithms.Add("diffie-hellman-group14-sha1", () => new DiffieHellmanGroupSha1(new DiffieHellman(2048)));
             _keyExchangeAlgorithms.Add("diffie-hellman-group1-sha1", () => new DiffieHellmanGroupSha1(new DiffieHellman(1024)));
 
