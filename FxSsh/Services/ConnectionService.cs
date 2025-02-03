@@ -14,14 +14,14 @@ namespace FxSsh.Services
     {
         private readonly object _locker = new object();
         private readonly List<Channel> _channels = new List<Channel>();
-        private readonly UserauthArgs _auth = null;
+        private readonly UserAuthArgs _auth = null;
         private readonly BlockingCollection<ConnectionServiceMessage> _messageQueue =
             new BlockingCollection<ConnectionServiceMessage>(new ConcurrentQueue<ConnectionServiceMessage>());
         private readonly CancellationTokenSource _messageCts = new CancellationTokenSource();
 
         private int _serverChannelCounter = -1;
 
-        public ConnectionService(Session session, UserauthArgs auth)
+        public ConnectionService(Session session, UserAuthArgs auth)
             : base(session)
         {
             Contract.Requires(auth != null);

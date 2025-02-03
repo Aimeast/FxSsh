@@ -1,9 +1,9 @@
 ﻿using System.Text;
 
-namespace FxSsh.Messages.Userauth
+namespace FxSsh.Messages.UserAuth
 {
     [Message("SSH_MSG_USERAUTH_REQUEST", MessageNumber)]
-    public class RequestMessage : UserauthServiceMessage
+    public class RequestMessage : UserAuthServiceMessage
     {
         protected const byte MessageNumber = 50;
 

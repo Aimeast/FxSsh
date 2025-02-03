@@ -97,10 +97,10 @@ TA==
             Console.WriteLine("Session {0} requesting {1}.",
                 BitConverter.ToString(session.SessionId).Replace("-", ""), e.GetType().Name);
 
-            if (e is UserauthService)
+            if (e is UserAuthService)
             {
-                var service = (UserauthService)e;
-                service.Userauth += service_Userauth;
+                var service = (UserAuthService)e;
+                service.UserAuth += service_UserAuth;
             }
             else if (e is ConnectionService)
             {
@@ -122,7 +122,7 @@ TA==
         {
             Console.WriteLine("Received a request to forward data to {0}:{1}", e.Host, e.Port);
 
-            var allow = true;  // func(e.Host, e.Port, e.AttachedUserauthArgs);
+            var allow = true;  // func(e.Host, e.Port, e.AttachedUserAuthArgs);
 
             if (!allow)
                 return;
@@ -147,7 +147,7 @@ TA==
             Console.WriteLine("Received environment variable {0}:{1}", e.Name, e.Value);
         }
 
-        static void service_Userauth(object sender, UserauthArgs e)
+        static void service_UserAuth(object sender, UserAuthArgs e)
         {
             Console.WriteLine("Client {0} fingerprint: {1}.", e.KeyAlgorithm, e.Fingerprint);
 
@@ -156,9 +156,9 @@ TA==
 
         static void service_CommandOpened(object sender, CommandRequestedArgs e)
         {
-            Console.WriteLine($"Channel {e.Channel.ServerChannelId} runs {e.ShellType}: \"{e.CommandText}\", client key SHA256:{e.AttachedUserauthArgs.Fingerprint}.");
+            Console.WriteLine($"Channel {e.Channel.ServerChannelId} runs {e.ShellType}: \"{e.CommandText}\", client key SHA256:{e.AttachedUserAuthArgs.Fingerprint}.");
 
-            e.Agreed = true;  // func(e.ShellType, e.CommandText, e.AttachedUserauthArgs);
+            e.Agreed = true;  // func(e.ShellType, e.CommandText, e.AttachedUserAuthArgs);
 
             if (!e.Agreed)
                 return;

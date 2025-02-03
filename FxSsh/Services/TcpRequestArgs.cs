@@ -4,7 +4,7 @@ namespace FxSsh.Services
 {
     public class TcpRequestArgs
     {
-        public TcpRequestArgs(SessionChannel channel, string host, int port, string originatorIP, int originatorPort, UserauthArgs userauthArgs)
+        public TcpRequestArgs(SessionChannel channel, string host, int port, string originatorIP, int originatorPort, UserAuthArgs userauthArgs)
         {
             Contract.Requires(channel != null);
             Contract.Requires(host != null);
@@ -15,7 +15,7 @@ namespace FxSsh.Services
             Port = port;
             OriginatorIP = originatorIP;
             OriginatorPort = originatorPort;
-            AttachedUserauthArgs = userauthArgs;
+            AttachedUserAuthArgs = userauthArgs;
         }
 
         public SessionChannel Channel { get; private set; }
@@ -23,6 +23,6 @@ namespace FxSsh.Services
         public int Port { get; private set; }
         public string OriginatorIP { get; private set; }
         public int OriginatorPort { get; private set; }
-        public UserauthArgs AttachedUserauthArgs { get; private set; }
+        public UserAuthArgs AttachedUserAuthArgs { get; private set; }
     }
 }
