@@ -4,12 +4,12 @@ namespace FxSsh.Services
 {
     public class PtyArgs
     {
-        public PtyArgs(SessionChannel channel, string terminal, uint heightPx, uint heightRows, uint widthPx, uint widthChars, string modes, UserAuthArgs userauthArgs)
+        public PtyArgs(SessionChannel channel, string terminal, uint heightPx, uint heightRows, uint widthPx, uint widthChars, string modes, UserAuthArgs userAuthArgs)
         {
             Contract.Requires(channel != null);
             Contract.Requires(terminal != null);
             Contract.Requires(modes != null);
-            Contract.Requires(userauthArgs != null);
+            Contract.Requires(userAuthArgs != null);
 
             Channel = channel;
             Terminal = terminal;
@@ -19,7 +19,7 @@ namespace FxSsh.Services
             WidthChars = widthChars;
             Modes = modes;
 
-            AttachedUserAuthArgs = userauthArgs;
+            AttachedUserAuthArgs = userAuthArgs;
         }
 
         public SessionChannel Channel { get; private set; }
