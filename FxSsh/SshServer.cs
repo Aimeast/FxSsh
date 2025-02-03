@@ -10,9 +10,9 @@ namespace FxSsh
 {
     public class SshServer : IDisposable
     {
-        private readonly object _lock = new object();
-        private readonly List<Session> _sessions = new List<Session>();
-        private readonly Dictionary<string, string> _hostKey = new Dictionary<string, string>();
+        private readonly object _lock = new();
+        private readonly List<Session> _sessions = [];
+        private readonly Dictionary<string, string> _hostKey = [];
         private bool _isDisposed;
         private bool _started;
         private TcpListener _listenser = null;
