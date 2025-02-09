@@ -1,18 +1,18 @@
 ﻿using FxSsh.Messages;
-using FxSsh.Messages.Userauth;
+using FxSsh.Messages.UserAuth;
 using System;
 using System.Diagnostics.Contracts;
 
 namespace FxSsh.Services
 {
-    public class UserauthService : SshService
+    public class UserAuthService : SshService
     {
-        public UserauthService(Session session)
+        public UserAuthService(Session session)
             : base(session)
         {
         }
 
-        public event EventHandler<UserauthArgs> Userauth;
+        public event EventHandler<UserAuthArgs> UserAuth;
 
         public event EventHandler<string> Succeed;
 
@@ -20,7 +20,7 @@ namespace FxSsh.Services
         {
         }
 
-        internal void HandleMessageCore(UserauthServiceMessage message)
+        internal void HandleMessageCore(UserAuthServiceMessage message)
         {
             Contract.Requires(message != null);
 
@@ -51,10 +51,10 @@ namespace FxSsh.Services
         {
             var verifed = false;
 
-            var args = new UserauthArgs(_session, message.Username, message.Password);
-            if (Userauth != null)
+            var args = new UserAuthArgs(_session, message.Username, message.Password);
+            if (UserAuth != null)
             {
-                Userauth(this, args);
+                UserAuth(this, args);
                 verifed = args.Result;
             }
 
@@ -82,8 +82,8 @@ namespace FxSsh.Services
                 var keyAlg = Session._publicKeyAlgorithms[message.KeyAlgorithmName](null);
                 keyAlg.LoadKeyAndCertificatesData(message.PublicKey);
 
-                var args = new UserauthArgs(base._session, message.Username, message.KeyAlgorithmName, keyAlg.GetFingerprint(), message.PublicKey);
-                Userauth?.Invoke(this, args);
+                var args = new UserAuthArgs(base._session, message.Username, message.KeyAlgorithmName, keyAlg.GetFingerprint(), message.PublicKey);
+                UserAuth?.Invoke(this, args);
                 verifed = args.Result;
 
                 if (!verifed)

@@ -1,7 +1,7 @@
 ﻿using System;
 using System.Text;
 
-namespace FxSsh.Messages.Userauth
+namespace FxSsh.Messages.UserAuth
 {
     public class PasswordRequestMessage : RequestMessage
     {

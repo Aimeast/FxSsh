@@ -2,9 +2,9 @@
 
 namespace FxSsh.Services
 {
-    public class UserauthArgs
+    public class UserAuthArgs
     {
-        public UserauthArgs(Session session, string username, string keyAlgorithm, string fingerprint, byte[] key)
+        public UserAuthArgs(Session session, string username, string keyAlgorithm, string fingerprint, byte[] key)
         {
             Contract.Requires(keyAlgorithm != null);
             Contract.Requires(fingerprint != null);
@@ -18,7 +18,7 @@ namespace FxSsh.Services
             Username = username;
         }
 
-        public UserauthArgs(Session session, string username, string password)
+        public UserAuthArgs(Session session, string username, string password)
         {
             Contract.Requires(username != null);
             Contract.Requires(password != null);

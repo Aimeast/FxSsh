@@ -1,4 +1,4 @@
-﻿using FxSsh.Messages;
+using FxSsh.Messages;
 using FxSsh.Messages.Connection;
 using System;
 using System.Collections.Concurrent;
@@ -14,13 +14,13 @@ namespace FxSsh.Services
     {
         private readonly object _locker = new();
         private readonly List<Channel> _channels = [];
-        private readonly UserauthArgs _auth = null;
+        private readonly UserAuthArgs _auth = null;
         private readonly BlockingCollection<ConnectionServiceMessage> _messageQueue = [];
         private readonly CancellationTokenSource _messageCts = new();
 
         private int _serverChannelCounter = -1;
 
-        public ConnectionService(Session session, UserauthArgs auth)
+        public ConnectionService(Session session, UserAuthArgs auth)
             : base(session)
         {
             Contract.Requires(auth != null);

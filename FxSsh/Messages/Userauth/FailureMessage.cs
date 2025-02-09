@@ -1,9 +1,9 @@
 ﻿using System.Text;
 
-namespace FxSsh.Messages.Userauth
+namespace FxSsh.Messages.UserAuth
 {
     [Message("SSH_MSG_USERAUTH_FAILURE", MessageNumber)]
-    public class FailureMessage : UserauthServiceMessage
+    public class FailureMessage : UserAuthServiceMessage
     {
         private const byte MessageNumber = 51;
 

@@ -31,7 +31,7 @@ namespace FxSsh
         public StartingInfo StartingInfo { get; private set; }
 
         public event EventHandler<Session> ConnectionAccepted;
-        public event EventHandler<Exception> ExceptionRasied;
+        public event EventHandler<Exception> ExceptionRaised;
 
         public void Start()
         {
@@ -128,14 +128,14 @@ namespace FxSsh
                     catch (SshConnectionException ex)
                     {
                         session.Disconnect(ex.DisconnectReason, ex.Message);
-                        if (ExceptionRasied != null)
-                            ExceptionRasied(this, ex);
+                        if (ExceptionRaised != null)
+							ExceptionRaised(this, ex);
                     }
                     catch (Exception ex)
                     {
                         session.Disconnect();
-                        if (ExceptionRasied != null)
-                            ExceptionRasied(this, ex);
+                        if (ExceptionRaised != null)
+							ExceptionRaised(this, ex);
                     }
                 });
             }
