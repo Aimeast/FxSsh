@@ -470,19 +470,19 @@ namespace FxSsh
         {
             var message = new KeyExchangeInitMessage
 			{
-				KeyExchangeAlgorithms = [.. _keyExchangeAlgorithms.Keys],
-				ServerHostKeyAlgorithms = _publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray(),
-				EncryptionAlgorithmsClientToServer = [.. _encryptionAlgorithms.Keys],
-				EncryptionAlgorithmsServerToClient = [.. _encryptionAlgorithms.Keys],
-				MacAlgorithmsClientToServer = [.. _hmacAlgorithms.Keys],
-				MacAlgorithmsServerToClient = [.. _hmacAlgorithms.Keys],
-				CompressionAlgorithmsClientToServer = [.. _compressionAlgorithms.Keys],
-				CompressionAlgorithmsServerToClient = [.. _compressionAlgorithms.Keys],
-				LanguagesClientToServer = [""],
-				LanguagesServerToClient = [""],
-				FirstKexPacketFollows = false,
-				Reserved = 0
-			};
+                KeyExchangeAlgorithms = [.. _keyExchangeAlgorithms.Keys],
+                ServerHostKeyAlgorithms = _publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray(),
+                EncryptionAlgorithmsClientToServer = [.. _encryptionAlgorithms.Keys],
+                EncryptionAlgorithmsServerToClient = [.. _encryptionAlgorithms.Keys],
+                MacAlgorithmsClientToServer = [.. _hmacAlgorithms.Keys],
+                MacAlgorithmsServerToClient = [.. _hmacAlgorithms.Keys],
+                CompressionAlgorithmsClientToServer = [.. _compressionAlgorithms.Keys],
+                CompressionAlgorithmsServerToClient = [.. _compressionAlgorithms.Keys],
+                LanguagesClientToServer = [""],
+                LanguagesServerToClient = [""],
+                FirstKexPacketFollows = false,
+                Reserved = 0
+            };
 
 			return message;
         }
