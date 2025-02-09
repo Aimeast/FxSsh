@@ -114,24 +114,21 @@ namespace FxSsh.Services
 
             ServerAttemptAdjustWindow((uint)data.Length);
 
-            if (DataReceived != null)
-                DataReceived(this, data);
+            DataReceived?.Invoke(this, data);
         }
 
         internal void OnEof()
         {
             ClientMarkedEof = true;
 
-            if (EofReceived != null)
-                EofReceived(this, EventArgs.Empty);
+            EofReceived?.Invoke(this, EventArgs.Empty);
         }
 
         internal void OnClose()
         {
             ClientClosed = true;
 
-            if (CloseReceived != null)
-                CloseReceived(this, EventArgs.Empty);
+            CloseReceived?.Invoke(this, EventArgs.Empty);
 
             CheckBothClosed();
         }
