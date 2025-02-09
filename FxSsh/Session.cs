@@ -484,7 +484,7 @@ namespace FxSsh
                 Reserved = 0
             };
 
-			return message;
+            return message;
         }
         #endregion
 
