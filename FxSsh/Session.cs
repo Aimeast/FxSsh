@@ -23,18 +23,13 @@ namespace FxSsh
         internal const int LocalChannelDataPacketSize = 1024 * 32;
 
         private static readonly Dictionary<byte, Type> _messagesMetadata;
-        internal static readonly Dictionary<string, Func<KexAlgorithm>> _keyExchangeAlgorithms =
-            new Dictionary<string, Func<KexAlgorithm>>();
-        internal static readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms =
-            new Dictionary<string, Func<string, PublicKeyAlgorithm>>();
-        internal static readonly Dictionary<string, Func<CipherInfo>> _encryptionAlgorithms =
-            new Dictionary<string, Func<CipherInfo>>();
-        internal static readonly Dictionary<string, Func<HmacInfo>> _hmacAlgorithms =
-            new Dictionary<string, Func<HmacInfo>>();
-        internal static readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms =
-            new Dictionary<string, Func<CompressionAlgorithm>>();
+        internal static readonly Dictionary<string, Func<KexAlgorithm>> _keyExchangeAlgorithms = [];
+        internal static readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms = [];
+        internal static readonly Dictionary<string, Func<CipherInfo>> _encryptionAlgorithms = [];
+        internal static readonly Dictionary<string, Func<HmacInfo>> _hmacAlgorithms = [];
+        internal static readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms = [];
 
-        private readonly object _locker = new object();
+        private readonly object _locker = new();
         private readonly Socket _socket;
 #if DEBUG
         private readonly TimeSpan _timeout = TimeSpan.FromDays(1);
@@ -49,8 +44,8 @@ namespace FxSsh
         private uint _inboundFlow;
         private Algorithms _algorithms = null;
         private ExchangeContext _exchangeContext = null;
-        private List<SshService> _services = new List<SshService>();
-        private ConcurrentQueue<Message> _blockedMessages = new ConcurrentQueue<Message>();
+        private List<SshService> _services = [];
+        private ConcurrentQueue<Message> _blockedMessages = new();
         private EventWaitHandle _hasBlockedMessagesWaitHandle = new ManualResetEvent(true);
 
         public string ServerVersion { get; private set; }
@@ -410,7 +405,7 @@ namespace FxSsh
             if (useAlg)
             {
                 var mac = ComputeHmac(_algorithms.ServerHmac, payload, _outboundPacketSequence);
-                payload = _algorithms.ServerEncryption.Transform(payload).Concat(mac).ToArray();
+                payload = [.. _algorithms.ServerEncryption.Transform(payload), .. mac];
             }
 
             SocketWrite(payload);
@@ -473,19 +468,21 @@ namespace FxSsh
 
         private Message LoadKexInitMessage()
         {
-            var message = new KeyExchangeInitMessage();
-            message.KeyExchangeAlgorithms = _keyExchangeAlgorithms.Keys.ToArray();
-            message.ServerHostKeyAlgorithms = _publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray();
-            message.EncryptionAlgorithmsClientToServer = _encryptionAlgorithms.Keys.ToArray();
-            message.EncryptionAlgorithmsServerToClient = _encryptionAlgorithms.Keys.ToArray();
-            message.MacAlgorithmsClientToServer = _hmacAlgorithms.Keys.ToArray();
-            message.MacAlgorithmsServerToClient = _hmacAlgorithms.Keys.ToArray();
-            message.CompressionAlgorithmsClientToServer = _compressionAlgorithms.Keys.ToArray();
-            message.CompressionAlgorithmsServerToClient = _compressionAlgorithms.Keys.ToArray();
-            message.LanguagesClientToServer = new[] { "" };
-            message.LanguagesServerToClient = new[] { "" };
-            message.FirstKexPacketFollows = false;
-            message.Reserved = 0;
+            var message = new KeyExchangeInitMessage
+            {
+                KeyExchangeAlgorithms = [.. _keyExchangeAlgorithms.Keys],
+                ServerHostKeyAlgorithms = _publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray(),
+                EncryptionAlgorithmsClientToServer = [.. _encryptionAlgorithms.Keys],
+                EncryptionAlgorithmsServerToClient = [.. _encryptionAlgorithms.Keys],
+                MacAlgorithmsClientToServer = [.. _hmacAlgorithms.Keys],
+                MacAlgorithmsServerToClient = [.. _hmacAlgorithms.Keys],
+                CompressionAlgorithmsClientToServer = [.. _compressionAlgorithms.Keys],
+                CompressionAlgorithmsServerToClient = [.. _compressionAlgorithms.Keys],
+                LanguagesClientToServer = [""],
+                LanguagesServerToClient = [""],
+                FirstKexPacketFollows = false,
+                Reserved = 0
+            };
 
             return message;
         }
@@ -520,14 +517,14 @@ namespace FxSsh
                 ServerHostKeyAlgorithms = message.ServerHostKeyAlgorithms
             });
 
-            _exchangeContext.KeyExchange = ChooseAlgorithm(_keyExchangeAlgorithms.Keys.ToArray(), message.KeyExchangeAlgorithms);
+            _exchangeContext.KeyExchange = ChooseAlgorithm([.. _keyExchangeAlgorithms.Keys], message.KeyExchangeAlgorithms);
             _exchangeContext.PublicKey = ChooseAlgorithm(_publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray(), message.ServerHostKeyAlgorithms);
-            _exchangeContext.ClientEncryption = ChooseAlgorithm(_encryptionAlgorithms.Keys.ToArray(), message.EncryptionAlgorithmsClientToServer);
-            _exchangeContext.ServerEncryption = ChooseAlgorithm(_encryptionAlgorithms.Keys.ToArray(), message.EncryptionAlgorithmsServerToClient);
-            _exchangeContext.ClientHmac = ChooseAlgorithm(_hmacAlgorithms.Keys.ToArray(), message.MacAlgorithmsClientToServer);
-            _exchangeContext.ServerHmac = ChooseAlgorithm(_hmacAlgorithms.Keys.ToArray(), message.MacAlgorithmsServerToClient);
-            _exchangeContext.ClientCompression = ChooseAlgorithm(_compressionAlgorithms.Keys.ToArray(), message.CompressionAlgorithmsClientToServer);
-            _exchangeContext.ServerCompression = ChooseAlgorithm(_compressionAlgorithms.Keys.ToArray(), message.CompressionAlgorithmsServerToClient);
+            _exchangeContext.ClientEncryption = ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsClientToServer);
+            _exchangeContext.ServerEncryption = ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsServerToClient);
+            _exchangeContext.ClientHmac = ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsClientToServer);
+            _exchangeContext.ServerHmac = ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsServerToClient);
+            _exchangeContext.ClientCompression = ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsClientToServer);
+            _exchangeContext.ServerCompression = ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsServerToClient);
 
             _exchangeContext.ClientKexInitPayload = message.GetPacket();
         }
