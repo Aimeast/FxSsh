@@ -164,8 +164,7 @@ namespace FxSsh
             }
             catch { }
 
-            if (Disconnected != null)
-                Disconnected(this, EventArgs.Empty);
+            Disconnected?.Invoke(this, EventArgs.Empty);
         }
 
         #region Socket operations

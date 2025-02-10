@@ -121,21 +121,18 @@ namespace FxSsh
                         _sessions.Add(session);
                     try
                     {
-                        if (ConnectionAccepted != null)
-                            ConnectionAccepted(this, session);
+                        ConnectionAccepted?.Invoke(this, session);
                         session.EstablishConnection();
                     }
                     catch (SshConnectionException ex)
                     {
                         session.Disconnect(ex.DisconnectReason, ex.Message);
-                        if (ExceptionRaised != null)
-							ExceptionRaised(this, ex);
+                        ExceptionRaised?.Invoke(this, ex);
                     }
                     catch (Exception ex)
                     {
                         session.Disconnect();
-                        if (ExceptionRaised != null)
-							ExceptionRaised(this, ex);
+                        ExceptionRaised?.Invoke(this, ex);
                     }
                 });
             }
