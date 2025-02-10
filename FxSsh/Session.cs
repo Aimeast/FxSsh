@@ -469,7 +469,7 @@ namespace FxSsh
         private Message LoadKexInitMessage()
         {
             var message = new KeyExchangeInitMessage
-			{
+            {
                 KeyExchangeAlgorithms = [.. _keyExchangeAlgorithms.Keys],
                 ServerHostKeyAlgorithms = _publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray(),
                 EncryptionAlgorithmsClientToServer = [.. _encryptionAlgorithms.Keys],
