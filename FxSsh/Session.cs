@@ -513,7 +513,8 @@ namespace FxSsh
                 LanguagesServerToClient = message.LanguagesServerToClient,
                 MacAlgorithmsClientToServer = message.MacAlgorithmsClientToServer,
                 MacAlgorithmsServerToClient = message.MacAlgorithmsServerToClient,
-                ServerHostKeyAlgorithms = message.ServerHostKeyAlgorithms
+                ServerHostKeyAlgorithms = message.ServerHostKeyAlgorithms,
+                CanSendExtInfo = message.CanSendExtInfo
             });
 
             _exchangeContext.KeyExchange = ChooseAlgorithm([.. _keyExchangeAlgorithms.Keys], message.KeyExchangeAlgorithms);
@@ -524,6 +525,7 @@ namespace FxSsh
             _exchangeContext.ServerHmac = ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsServerToClient);
             _exchangeContext.ClientCompression = ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsClientToServer);
             _exchangeContext.ServerCompression = ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsServerToClient);
+            _exchangeContext.CanSendExtInfo = message.CanSendExtInfo;
 
             _exchangeContext.ClientKexInitPayload = message.GetPacket();
         }
@@ -611,6 +613,13 @@ namespace FxSsh
 
         private void HandleMessage(NewKeysMessage message)
         {
+            if (_exchangeContext.CanSendExtInfo)
+            {
+                var extInfo = new ExtInfoMessage();
+                extInfo.Extensions.Add(ExtInfoMessage.ServerSignatureAlgorithms, string.Join(",", _publicKeyAlgorithms.Keys));
+                SendMessage(extInfo);
+            }
+            
             _hasBlockedMessagesWaitHandle.Reset();
 
             lock (_locker)
@@ -810,6 +819,7 @@ namespace FxSsh
             public byte[] ServerKexInitPayload;
 
             public Algorithms NewAlgorithms;
+            public bool CanSendExtInfo;
         }
     }
 }

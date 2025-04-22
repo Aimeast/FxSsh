@@ -35,5 +35,7 @@ namespace FxSsh.Services
         public string[] LanguagesClientToServer { get; set; }
 
         public string[] LanguagesServerToClient { get; set; }
+
+        public bool CanSendExtInfo { get; set; }
     }
 }
