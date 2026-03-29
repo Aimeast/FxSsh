@@ -13,6 +13,7 @@ namespace FxSsh
         private readonly object _lock = new();
         private readonly List<Session> _sessions = [];
         private readonly Dictionary<string, string> _hostKey = [];
+        private bool _noAuth = false;
         private bool _isDisposed;
         private bool _started;
         private TcpListener _listenser = null;
@@ -79,6 +80,8 @@ namespace FxSsh
             }
         }
 
+        public void SetNoAuth(bool enable) => _noAuth = enable;
+        
         public void AddHostKey(string type, string xml)
         {
             Contract.Requires(type != null);
