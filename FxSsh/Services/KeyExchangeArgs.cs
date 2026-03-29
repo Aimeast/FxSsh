@@ -1,9 +1,4 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Diagnostics.Contracts;
-using System.Text;
-
-namespace FxSsh.Services
+﻿namespace FxSsh.Services
 {
     public class KeyExchangeArgs
     {

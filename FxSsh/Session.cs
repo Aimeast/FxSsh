@@ -22,7 +22,6 @@ namespace FxSsh
         internal const int InitialLocalWindowSize = LocalChannelDataPacketSize * 32;
         internal const int LocalChannelDataPacketSize = 1024 * 32;
 
-        private static readonly Dictionary<byte, Type> _messagesMetadata;
         internal static readonly Dictionary<string, Func<KexAlgorithm>> _keyExchangeAlgorithms = [];
         internal static readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms = [];
         internal static readonly Dictionary<string, Func<CipherInfo>> _encryptionAlgorithms = [];
@@ -79,12 +78,6 @@ namespace FxSsh
             _hmacAlgorithms.Add("hmac-sha2-512", () => new HmacInfo(new HMACSHA512(), 512));
 
             _compressionAlgorithms.Add("none", () => new NoCompression());
-
-            _messagesMetadata = (from t in typeof(Message).Assembly.GetTypes()
-                                 let attrib = (MessageAttribute)t.GetCustomAttributes(typeof(MessageAttribute), false).FirstOrDefault()
-                                 where attrib != null
-                                 select new { attrib.Number, Type = t })
-                                 .ToDictionary(x => x.Number, x => x.Type);
         }
 
         public Session(Socket socket, Dictionary<string, string> hostKey, string serverBanner)
@@ -336,9 +329,9 @@ namespace FxSsh
             }
 
             var typeNumber = data.Span[0];
-            var implemented = _messagesMetadata.ContainsKey(typeNumber);
+            var implemented = MessageRegistry.Registry.ContainsKey(typeNumber);
             var message = implemented
-                ? (Message)Activator.CreateInstance(_messagesMetadata[typeNumber])
+                ? MessageRegistry.Registry[typeNumber].Invoke()
                 : new UnknownMessage { SequenceNumber = _inboundPacketSequence, UnknownMessageType = typeNumber };
 
             if (implemented)
@@ -490,7 +483,40 @@ namespace FxSsh
         #region Handle messages
         private void HandleMessageCore(Message message)
         {
-            this.HandleMessage((dynamic)message);
+            switch (message) {
+                case DisconnectMessage m:
+                    HandleMessage(m);
+                    break;
+                case KeyExchangeInitMessage m:
+                    HandleMessage(m);
+                    break;
+                case KeyExchangeDhInitMessage m:
+                    HandleMessage(m);
+                    break;
+                case KeyExchangeECDhInitMessage m:
+                    HandleMessage(m);
+                    break;
+                case KeyExchangeXInitMessage m:
+                    HandleMessage(m);
+                    break;
+                case NewKeysMessage m:
+                    HandleMessage(m);
+                    break;
+                case UnimplementedMessage m: 
+                    HandleMessage(m);
+                    break;
+                case ServiceRequestMessage m:
+                    HandleMessage(m);
+                    break;
+                case UserAuthServiceMessage m:
+                    HandleMessage(m);
+                    break;
+                case ConnectionServiceMessage m:
+                    HandleMessage(m);
+                    break;
+                default:
+                    throw new KeyNotFoundException($"The handler for this message({message.MessageType}) was not found");
+            }
         }
 
         private void HandleMessage(DisconnectMessage message)

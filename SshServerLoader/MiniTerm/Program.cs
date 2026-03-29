@@ -1,6 +1,4 @@
-﻿using System;
-
-namespace MiniTerm
+﻿namespace MiniTerm
 {
     /// <summary>
     /// C# version of:

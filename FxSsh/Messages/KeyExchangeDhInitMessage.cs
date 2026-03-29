@@ -1,6 +1,4 @@
-﻿using System;
-
-namespace FxSsh.Messages
+﻿namespace FxSsh.Messages
 {
     public class KeyExchangeDhInitMessage : KeyExchangeXInitMessage
     {

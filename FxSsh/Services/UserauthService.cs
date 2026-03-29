@@ -1,6 +1,7 @@
 ﻿using FxSsh.Messages;
 using FxSsh.Messages.UserAuth;
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.Contracts;
 
 namespace FxSsh.Services
@@ -23,8 +24,19 @@ namespace FxSsh.Services
         internal void HandleMessageCore(UserAuthServiceMessage message)
         {
             Contract.Requires(message != null);
-
-            this.HandleMessage((dynamic)message);
+            switch (message) {
+                case PasswordRequestMessage m:
+                    HandleMessage(m);
+                    break;
+                case PublicKeyRequestMessage m:
+                    HandleMessage(m);
+                    break;
+                case RequestMessage m:
+                    HandleMessage(m);
+                    break;
+                default:
+                    throw new KeyNotFoundException($"The handler for this message({message.MessageType}) was not found");
+            }
         }
 
         private void HandleMessage(RequestMessage message)

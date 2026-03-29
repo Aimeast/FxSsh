@@ -53,8 +53,8 @@ namespace FxSsh.Services
         {
             Contract.Requires(message != null);
 
-            if (message is ChannelWindowAdjustMessage)
-                this.HandleMessage((dynamic)message);
+            if (message is ChannelWindowAdjustMessage cwm)
+                HandleMessage(cwm);
             else
                 _messageQueue.Add(message);
         }
@@ -66,7 +66,58 @@ namespace FxSsh.Services
                 while (true)
                 {
                     var message = _messageQueue.Take(_messageCts.Token);
-                    this.HandleMessage((dynamic)message);
+                    switch (message) {
+                        case DirectTcpIpMessage m:
+                            HandleMessage(m);
+                            break;
+                        case ForwardedTcpIpMessage m:
+                            HandleMessage(m);
+                            break;
+                        case SessionOpenMessage m:
+                            HandleMessage(m);
+                            break;
+                        case ChannelOpenMessage m:
+                            HandleMessage(m);
+                            break;
+                        case ShouldIgnoreMessage m:
+                            HandleMessage(m);
+                            break;
+                        case EnvMessage m:
+                            HandleMessage(m);
+                            break;
+                        case PtyRequestMessage m:
+                            HandleMessage(m);
+                            break;
+                        case ShellRequestMessage m:
+                            HandleMessage(m);
+                            break;
+                        case CommandRequestMessage m:
+                            HandleMessage(m);
+                            break;
+                        case SubsystemRequestMessage m:
+                            HandleMessage(m);
+                            break;
+                        case WindowChangeMessage m:
+                            HandleMessage(m);
+                            break;
+                        case ChannelRequestMessage m:
+                            HandleMessage(m);
+                            break;
+                        case ChannelDataMessage m:
+                            HandleMessage(m);
+                            break;
+                        case ChannelWindowAdjustMessage m:
+                            HandleMessage(m);
+                            break;
+                        case ChannelEofMessage m:
+                            HandleMessage(m);
+                            break;
+                        case ChannelCloseMessage m:
+                            HandleMessage(m);
+                            break;
+                        default:
+                            throw new KeyNotFoundException($"The handler for this message({message.MessageType}) was not found");
+                    }
                 }
             }
             catch (OperationCanceledException)
