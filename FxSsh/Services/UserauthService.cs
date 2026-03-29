@@ -40,13 +40,12 @@ namespace FxSsh.Services
                     HandleMessage(pswdMsg);
                     break;
                 case "none":
-                    if (_session.NoAuth) {
-                        var args = new UserAuthArgs(_session, message.Username, null);
-                        UserAuth?.Invoke(this, args);
-                        _session.RegisterService(message.ServiceName, args);
-                        Succeed?.Invoke(this, message.ServiceName);
-                        _session.SendMessage(new SuccessMessage());   
-                    }
+                    if (!_session.NoAuth) goto default;
+                    var args = new UserAuthArgs(_session, message.Username, null);
+                    UserAuth?.Invoke(this, args);
+                    _session.RegisterService(message.ServiceName, args);
+                    Succeed?.Invoke(this, message.ServiceName);
+                    _session.SendMessage(new SuccessMessage());
                     break;
                 case "hostbased":
                 default:
