@@ -3,12 +3,15 @@ using System.Buffers;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
+using System.IO.Pipelines;
 using System.Linq;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
+using System.Threading.Channels;
+using System.Threading.Tasks;
 using FxSsh.Algorithms;
 using FxSsh.Logging;
 using FxSsh.Messages;
@@ -40,12 +43,21 @@ namespace FxSsh
         private readonly object _locker = new();
         private Socket _socket;
         private bool _disconnected;
-#if DEBUG
-        private readonly TimeSpan _timeout = TimeSpan.FromDays(1);
-#else
-        private readonly TimeSpan _timeout = TimeSpan.FromSeconds(30);
-#endif
         private readonly Dictionary<string, string> _hostKey;
+
+        // Async transport core. Raw socket bytes flow in through _receivePipe
+        // (filled by FillPipeAsync) and are consumed as framed packets by
+        // ProcessPipeAsync; outbound wire buffers are enqueued to _sendChannel
+        // by SendMessageInternal and written by the single-reader send pump
+        // (ProcessSendChannelAsync). No thread is ever blocked on socket I/O,
+        // so thousands of sessions do not consume a thread each - the
+        // ConnectionService.MessageLoop and the per-session pumps are all
+        // async tasks that park on the pipe/channel instead.
+        private readonly Pipe _receivePipe = new();
+        private readonly System.Threading.Channels.Channel<PooledBuffer> _sendChannel =
+            System.Threading.Channels.Channel.CreateUnbounded<PooledBuffer>(new UnboundedChannelOptions { SingleReader = true });
+
+        private CancellationTokenSource _sessionCts;
 
         // Server-side keepalive. IdleThreshold is both the idle threshold that
         // starts the probing and the resend cadence once probing has started.
@@ -70,16 +82,10 @@ namespace FxSsh
         private Dictionary<string, string> _extensionsToSend = [];
         private bool _clientAdvertisedExtInfo;  // client KEXINIT had "ext-info-c"
         private ConcurrentQueue<Message> _blockedMessages = new();
-        private EventWaitHandle _hasBlockedMessagesWaitHandle = new ManualResetEvent(true);
 
-        // Reusable outbound buffers. SendMessageInternal is always serialized
-        // (under _locker via SendMessage, or inside the NEWKEYS
-        // blocked-message window), so these can be reused across packets with
-        // zero per-packet heap allocation:
-        //   _sendScratchBuffer - plaintext frame [packet_length][padding_length][payload][padding]
-        //   _sendBuffer       - final wire packet (ciphertext + tag/MAC)
-        private readonly byte[] _sendScratchBuffer = new byte[4 + MaximumPacketLength + 255];
-        private readonly byte[] _sendBuffer = new byte[4 + MaximumPacketLength + 255 + 64];
+        private static long _nextId = 0;
+        public long Id { get; }
+        public ConcurrentDictionary<Type, object> ContextData { get; } = new();
 
         public string ServerVersion { get; private set; }
         public string ClientVersion { get; private set; }
@@ -127,6 +133,7 @@ namespace FxSsh
             ArgumentNullException.ThrowIfNull(socket);
             ArgumentNullException.ThrowIfNull(hostKey);
 
+            Id = Interlocked.Increment(ref _nextId);
             _socket = socket;
             _hostKey = hostKey.ToDictionary(s => s.Key, s => s.Value);
             ServerVersion = serverBanner;
@@ -138,55 +145,41 @@ namespace FxSsh
 
         public event EventHandler<KeyExchangeArgs> KeysExchanged;
 
-        internal void EstablishConnection()
+        /// <summary>
+        /// Run the SSH session to completion (protocol exchange, key exchange,
+        /// and the service message loop) without ever blocking a thread on
+        /// socket I/O. The session pumps the socket into a receive pipe and
+        /// out of a send channel; returns when the peer disconnects, an error
+        /// occurs, or the session is torn down.
+        /// </summary>
+        /// <param name="externalToken">Cancel to tear the session down. Optional.</param>
+        public async Task StartAsync(CancellationToken externalToken = default)
         {
             if (!_socket.Connected)
             {
                 return;
             }
 
+            _sessionCts = new CancellationTokenSource();
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(_sessionCts.Token, externalToken);
+
             SetSocketOptions();
 
-            SocketWriteProtocolVersion();
-            ClientVersion = SocketReadProtocolVersion();
-            Log.Info($"Client version: {ClientVersion}.");
-            if (!Regex.IsMatch(ClientVersion, "SSH-2.0-.+"))
-            {
-                Log.Warn($"Unsupported client SSH version: {ClientVersion}.");
-                throw new SshConnectionException(
-                    string.Format("Not supported for client SSH version {0}. This server only supports SSH v2.0.", ClientVersion),
-                    DisconnectReason.ProtocolVersionNotSupported);
-            }
-
-            Log.Debug("Session established, starting key exchange.");
-            ConsiderReExchange(true);
+            var fillPipeTask = FillPipeAsync(linkedCts.Token);
+            var processPipeTask = ProcessPipeAsync(linkedCts.Token);
+            var sendTask = ProcessSendChannelAsync(linkedCts.Token);
 
             try
             {
-                while (!_disconnected && _socket != null && _socket.Connected)
-                {
-                    var message = ReceiveMessage();
-                    if (message is UnknownMessage unknownMessage)
-                    {
-                        Log.Debug($"Unknown message type {((UnknownMessage)message).UnknownMessageType}, replying SSH_MSG_UNIMPLEMENTED.");
-                        SendMessage(unknownMessage.MakeUnimplementedMessage());
-                    }
-                    else
-                        HandleMessageCore(message);
-                }
+                await Task.WhenAll(fillPipeTask, processPipeTask, sendTask);
             }
-            finally
+            catch (Exception ex)
             {
-                foreach (var service in _services)
-                {
-                    service.CloseService();
-                }
-
-                Disconnect();
+                await DisconnectAsync(DisconnectReason.ProtocolError, ex.Message);
             }
         }
 
-        public void Disconnect(DisconnectReason reason = DisconnectReason.ByApplication, string description = "Connection terminated by the server.")
+        public async Task DisconnectAsync(DisconnectReason reason = DisconnectReason.ByApplication, string description = "Connection terminated by the server.")
         {
             bool runTeardown;
             lock (_locker)
@@ -208,11 +201,22 @@ namespace FxSsh
                 TrySendMessage(message);
             }
 
+            _sendChannel.Writer.TryComplete();
+
+            if (_sessionCts is { IsCancellationRequested: false })
+                await _sessionCts.CancelAsync();
+
             try
             {
-                _socket.Shutdown(SocketShutdown.Both);
-                _socket.Close();
-                _socket.Dispose();
+                if (_socket is { Connected: true })
+                    _socket.Shutdown(SocketShutdown.Both);
+            }
+            catch { }
+
+            try
+            {
+                _socket?.Close();
+                _socket?.Dispose();
             }
             catch { }
             finally
@@ -224,111 +228,160 @@ namespace FxSsh
             Disconnected?.Invoke(this, EventArgs.Empty);
         }
 
+        public void Disconnect(DisconnectReason reason = DisconnectReason.ByApplication, string description = "Connection terminated by the server.")
+        {
+            _ = DisconnectAsync(reason, description);
+        }
+
         #region Socket operations
         private void SetSocketOptions()
         {
             const int socketBufferSize = 2 * MaximumSshPacketSize;
-            _socket.SetSocketOption(SocketOptionLevel.Tcp, SocketOptionName.NoDelay, true);
+            _socket.NoDelay = true;
             _socket.LingerState = new LingerOption(enable: false, seconds: 0);
-            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.SendBuffer, socketBufferSize);
-            _socket.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReceiveBuffer, socketBufferSize);
-            _socket.ReceiveTimeout = (int)_timeout.TotalMilliseconds;
-        }
-
-        private string SocketReadProtocolVersion()
-        {
-            // http://tools.ietf.org/html/rfc4253#section-4.2
-            var buffer = new byte[255];
-            var dummy = new byte[255];
-            var pos = 0;
-
-            while (pos < buffer.Length)
-            {
-                if (!WaitForSocket(SelectMode.SelectRead))
-                    throw new SshConnectionException("Could't read the protocal version", DisconnectReason.ProtocolError);
-
-                int len;
-                try
-                {
-                    len = _socket.Receive(buffer, pos, buffer.Length - pos, SocketFlags.Peek);
-                }
-                catch (SocketException exp) when (
-                    exp.SocketErrorCode == SocketError.WouldBlock ||
-                    exp.SocketErrorCode == SocketError.IOPending ||
-                    exp.SocketErrorCode == SocketError.NoBufferSpaceAvailable)
-                {
-                    continue;
-                }
-                catch (SocketException exp) when (
-                    exp.SocketErrorCode == SocketError.ConnectionReset ||
-                    exp.SocketErrorCode == SocketError.ConnectionAborted ||
-                    exp.SocketErrorCode == SocketError.Shutdown)
-                {
-                    throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
-                }
-                if (len == 0)
-                {
-                    throw new SshConnectionException("Could't read the protocal version", DisconnectReason.ProtocolError);
-                }
-
-                for (var i = 0; i < len; i++, pos++)
-                {
-                    if (pos > 0 && buffer[pos - 1] == CarriageReturn && buffer[pos] == LineFeed)
-                    {
-                        _socket.Receive(dummy, 0, i + 1, SocketFlags.None);
-                        return Encoding.ASCII.GetString(buffer, 0, pos - 1);
-                    }
-                    else if (pos > 0 && buffer[pos] == LineFeed) // Non-RFC case
-                    {
-                        _socket.Receive(dummy, 0, i + 1, SocketFlags.None);
-                        return Encoding.ASCII.GetString(buffer, 0, pos);
-                    }
-                }
-                _socket.Receive(dummy, 0, len, SocketFlags.None);
-            }
-            throw new SshConnectionException("Could't read the protocal version", DisconnectReason.ProtocolError);
-        }
-
-        private void SocketWriteProtocolVersion()
-        {
-            SocketWrite(Encoding.ASCII.GetBytes(ServerVersion + "\r\n"));
+            _socket.ReceiveBufferSize = socketBufferSize;
+            _socket.SendBufferSize = socketBufferSize;
         }
 
         /// <summary>
-        /// A pooled receive buffer rented from <see cref="ArrayPool{byte}.Shared"/>
-        /// by <see cref="SocketRead"/> and returned on Dispose. Callers must
-        /// <c>using</c> the result and consume the bytes before disposing -
-        /// the exposed <see cref="Span"/>/<see cref="Memory"/> views are valid
-        /// only until Dispose returns the rental to the pool.
-        ///
-        /// Replaces the per-packet <c>new byte[length]</c> that previously
-        /// backed every SocketRead call. The pool gives us a buffer that may
-        /// be larger than <see cref="Length"/>; consumers must slice through
-        /// <see cref="Span"/>/<see cref="Memory"/>, NOT index <see cref="Buffer"/>
-        /// past <see cref="Length"/>.
+        /// Receive pump: copy raw socket bytes into the receive pipe. The only
+        /// task in the session that touches the socket for reading, so the
+        /// protocol loop and every service never block on inbound I/O.
         /// </summary>
-        private ref struct PooledReceiveBuffer
+        private async Task FillPipeAsync(CancellationToken token)
+        {
+            try
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    var memory = _receivePipe.Writer.GetMemory(1024);
+                    var bytesRead = await _socket.ReceiveAsync(memory, SocketFlags.None, token);
+                    if (bytesRead == 0) break;
+
+                    _receivePipe.Writer.Advance(bytesRead);
+                    var result = await _receivePipe.Writer.FlushAsync(token);
+                    if (result.IsCompleted) break;
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                await _receivePipe.Writer.CompleteAsync(ex);
+                return;
+            }
+            await _receivePipe.Writer.CompleteAsync();
+        }
+
+        /// <summary>
+        /// Protocol pump: banner -> protocol version -> key exchange -> the
+        /// SSH message loop. Reads framed packets out of the receive pipe,
+        /// decrypts/verifies them, and dispatches to HandleMessageCore. The
+        /// replacement for the old blocking EstablishConnection loop.
+        /// </summary>
+        private async Task ProcessPipeAsync(CancellationToken token)
+        {
+            try
+            {
+                // Server banner is the first outbound frame; enqueue it ahead
+                // of the version read (matching the old SocketWriteProtocolVersion
+                // ordering).
+                var banner = Encoding.ASCII.GetBytes(ServerVersion + "\r\n");
+                var bannerBuf = ArrayPool<byte>.Shared.Rent(banner.Length);
+                banner.CopyTo(bannerBuf.AsSpan());
+                _sendChannel.Writer.TryWrite(new PooledBuffer(bannerBuf, banner.Length));
+
+                ClientVersion = await ReadProtocolVersionAsync(token);
+                Log.Info($"Client version: {ClientVersion}.");
+                if (!Regex.IsMatch(ClientVersion, "SSH-2.0-.+"))
+                {
+                    Log.Warn($"Unsupported client SSH version: {ClientVersion}.");
+                    throw new SshConnectionException(
+                        string.Format("Not supported for client SSH version {0}. This server only supports SSH v2.0.", ClientVersion),
+                        DisconnectReason.ProtocolVersionNotSupported);
+                }
+
+                Log.Debug("Session established, starting key exchange.");
+                ConsiderReExchange(true);
+
+                while (!token.IsCancellationRequested)
+                {
+                    var message = await ReceiveMessageAsync(token);
+                    if (message is null) break;
+
+                    if (message is UnknownMessage unknownMessage)
+                    {
+                        Log.Debug($"Unknown message type {unknownMessage.UnknownMessageType}, replying SSH_MSG_UNIMPLEMENTED.");
+                        SendMessage(unknownMessage.MakeUnimplementedMessage());
+                    }
+                    else
+                        HandleMessageCore(message);
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                await DisconnectAsync(DisconnectReason.ProtocolError, ex.Message);
+            }
+            finally
+            {
+                foreach (var service in _services)
+                {
+                    service.CloseService();
+                }
+                await _receivePipe.Reader.CompleteAsync();
+                _ = DisconnectAsync();
+            }
+        }
+
+        /// <summary>
+        /// Send pump: the single reader of <see cref="_sendChannel"/>. Each
+        /// enqueued wire buffer is written to the socket asynchronously; the
+        /// rental is returned to the pool once SendAsync has consumed it.
+        /// </summary>
+        private async Task ProcessSendChannelAsync(CancellationToken token)
+        {
+            try
+            {
+                await foreach (var payload in _sendChannel.Reader.ReadAllAsync(token))
+                {
+                    using (payload)
+                    {
+                        var memory = new ReadOnlyMemory<byte>(payload.Array, 0, payload.Length);
+                        await _socket.SendAsync(memory, SocketFlags.None, token);
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception ex)
+            {
+                throw new SshConnectionException("Socket send operation failed.", DisconnectReason.ConnectionLost, ex);
+            }
+        }
+
+        /// <summary>
+        /// A pooled byte buffer rented from <see cref="ArrayPool{byte}.Shared"/>
+        /// that flows between the async pumps. Unlike the old ref struct
+        /// (which could only live on the stack), this one is stored inside
+        /// <see cref="_sendChannel"/> and <see cref="Pipe"/>-backed reads, so
+        /// it must be a plain struct. Dispose returns the rental to the pool.
+        /// </summary>
+        private struct PooledBuffer : IDisposable
         {
             private byte[] _buffer;
             private readonly int _length;
 
-            public PooledReceiveBuffer(byte[] buffer, int length)
+            public PooledBuffer(byte[] buffer, int length)
             {
                 _buffer = buffer;
                 _length = length;
             }
 
             public int Length => _length;
-            public byte[] Buffer => _buffer ?? throw new ObjectDisposedException(nameof(PooledReceiveBuffer));
+            public byte[] Array => _buffer ?? throw new ObjectDisposedException(nameof(PooledBuffer));
             public Span<byte> Span => _buffer.AsSpan(0, _length);
             public ReadOnlySpan<byte> ReadOnlySpan => _buffer.AsSpan(0, _length);
             public Memory<byte> Memory => _buffer.AsMemory(0, _length);
             public ReadOnlyMemory<byte> ReadOnlyMemory => _buffer.AsMemory(0, _length);
-
-            /// <summary>
-            /// Slice the pooled buffer without copying. Valid only until Dispose.
-            /// </summary>
-            public ReadOnlySpan<byte> Slice(int start, int length) => _buffer.AsSpan(start, length);
 
             public void Dispose()
             {
@@ -341,19 +394,13 @@ namespace FxSsh
         }
 
         /// <summary>
-        /// Read exactly <paramref name="length"/> bytes from the socket into a
-        /// pooled buffer (ArrayPool<byte>.Shared). Returns a ref struct that
-        /// returns the rental on Dispose - callers MUST <c>using</c> the result
-        /// and consume the bytes before disposing. The pooled buffer may be
-        /// larger than <paramref name="length"/>; consume via the returned
-        /// Span/Memory views, not by indexing Buffer past Length.
-        ///
-        /// Replaces the previous <c>new byte[length]</c> per call. On the SSH
-        /// receive hot path this cuts one allocation per SocketRead call -
-        /// AEAD: 2 calls (len + ciphertext), ETM: 3 calls, non-ETM: 4 calls
-        /// per packet - all now pooled rather than GC'd.
+        /// Read exactly <paramref name="length"/> bytes from the receive pipe
+        /// into a pooled buffer. Returns an empty buffer when the peer closed
+        /// the connection before the requested bytes arrived (EOF). Callers
+        /// MUST <c>using</c> the result and consume the bytes before
+        /// disposing; the pooled buffer may be larger than the length.
         /// </summary>
-        private PooledReceiveBuffer SocketRead(int length)
+        private async ValueTask<PooledBuffer> ReadFromPipeAsync(int length, CancellationToken token)
         {
             if (length < 0 || length > MaximumPacketLength + 4 + 64)
             {
@@ -362,97 +409,54 @@ namespace FxSsh
                     DisconnectReason.ProtocolError);
             }
 
+            if (length == 0)
+                return new PooledBuffer([], 0);
+
+            var result = await _receivePipe.Reader.ReadAtLeastAsync(length, token);
+            if (result.IsCanceled || (result.IsCompleted && result.Buffer.Length < length))
+                return new PooledBuffer(Array.Empty<byte>(), 0);
+
             var buffer = ArrayPool<byte>.Shared.Rent(length);
-            var pos = 0;
+            result.Buffer.Slice(0, length).CopyTo(buffer);
+            _receivePipe.Reader.AdvanceTo(result.Buffer.GetPosition(length));
 
-            while (pos < length)
-            {
-                if (!WaitForSocket(SelectMode.SelectRead))
-                    throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
-
-                int len;
-                try
-                {
-                    len = _socket.Receive(buffer, pos, length - pos, SocketFlags.None);
-                }
-                catch (SocketException exp) when (
-                    exp.SocketErrorCode == SocketError.WouldBlock ||
-                    exp.SocketErrorCode == SocketError.IOPending ||
-                    exp.SocketErrorCode == SocketError.NoBufferSpaceAvailable)
-                {
-                    continue;
-                }
-                catch (SocketException exp) when (
-                    exp.SocketErrorCode == SocketError.ConnectionReset ||
-                    exp.SocketErrorCode == SocketError.ConnectionAborted ||
-                    exp.SocketErrorCode == SocketError.Shutdown)
-                {
-                    // Peer closed or reset the connection (e.g. normal exit after
-                    // our channel/session teardown). Treat as a clean ConnectionLost,
-                    // not an unexpected protocol error.
-                    throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
-                }
-
-                if (len == 0)
-                    throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
-
-                pos += len;
-            }
-
-            return new PooledReceiveBuffer(buffer, length);
+            return new PooledBuffer(buffer, length);
         }
 
-        private void SocketWrite(ReadOnlySpan<byte> data)
+        private async Task<string> ReadProtocolVersionAsync(CancellationToken token)
         {
-            var pos = 0;
-            var length = data.Length;
-
-            while (pos < length)
+            while (!token.IsCancellationRequested)
             {
-                if (!WaitForSocket(SelectMode.SelectWrite))
-                    throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
+                var result = await _receivePipe.Reader.ReadAsync(token);
+                var buffer = result.Buffer;
+                var endOfLine = buffer.PositionOf(LineFeed);
 
-                int sent;
-                try
+                if (endOfLine != null)
                 {
-                    sent = _socket.Send(data.Slice(pos, length - pos));
-                }
-                catch (SocketException ex) when (
-                    ex.SocketErrorCode == SocketError.WouldBlock ||
-                    ex.SocketErrorCode == SocketError.IOPending ||
-                    ex.SocketErrorCode == SocketError.NoBufferSpaceAvailable)
-                {
-                    continue;
-                }
-                catch (SocketException ex) when (
-                    ex.SocketErrorCode == SocketError.ConnectionReset ||
-                    ex.SocketErrorCode == SocketError.ConnectionAborted ||
-                    ex.SocketErrorCode == SocketError.Shutdown)
-                {
-                    throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
+                    var lineSequence = buffer.Slice(0, endOfLine.Value);
+                    if (lineSequence.Length > 0 && lineSequence.End.GetInteger() > 0)
+                    {
+                        var lastByte = lineSequence.Slice(lineSequence.Length - 1).First.Span[0];
+                        if (lastByte == CarriageReturn)
+                            lineSequence = lineSequence.Slice(0, lineSequence.Length - 1);
+                    }
+
+                    var version = Encoding.ASCII.GetString(lineSequence);
+                    _receivePipe.Reader.AdvanceTo(buffer.GetPosition(1, endOfLine.Value));
+                    return version;
                 }
 
-                if (sent == 0)
-                    throw new SshConnectionException("Connection lost", DisconnectReason.ConnectionLost);
+                if (result.IsCompleted)
+                    throw new SshConnectionException("Connection closed before protocol version exchange.", DisconnectReason.ConnectionLost);
 
-                pos += sent;
+                _receivePipe.Reader.AdvanceTo(buffer.Start, buffer.End);
             }
-        }
-
-        private bool WaitForSocket(SelectMode mode)
-        {
-            // Non-blocking wait before Receive/Send so the I/O thread never spins or
-            // sleeps on the socket. Poll takes microseconds; clamp the (debug) timeout
-            // to int.MaxValue so a very large value cannot overflow the argument.
-            var microSeconds = _timeout.TotalMilliseconds >= int.MaxValue / 1000d
-                ? int.MaxValue
-                : (int)(_timeout.TotalMilliseconds * 1000);
-            return _socket.Poll(microSeconds, mode);
+            throw new OperationCanceledException();
         }
         #endregion
 
         #region Message operations
-        private Message ReceiveMessage()
+        private async Task<Message> ReceiveMessageAsync(CancellationToken token)
         {
             var useAlg = _algorithms != null;
             var isEtm = useAlg && _algorithms.ClientHmacIsEtm;
@@ -468,7 +472,8 @@ namespace FxSsh
                 // lenBuf is the 4-byte plaintext packet_length that GCM uses
                 // as Additional Authenticated Data. Dispose after DecryptAead
                 // consumes it.
-                using var lenBuf = SocketRead(4);
+                using var lenBuf = await ReadFromPipeAsync(4, token);
+                if (lenBuf.Length == 0) return null;
                 var lenSpan = lenBuf.Span;
                 var packetLength = lenSpan[0] << 24 | lenSpan[1] << 16 | lenSpan[2] << 8 | lenSpan[3];
                 if (packetLength < MinimumPacketLength || packetLength > MaximumPacketLength)
@@ -484,7 +489,8 @@ namespace FxSsh
                 // plaintext packet_length (lenBuf) is GCM's Additional Authenticated
                 // Data -- authenticated but not encrypted, covered by the tag.
                 var tagLength = _algorithms.ClientEncryption.TagBytes;
-                using var ciphertextWithTag = SocketRead(packetLength + tagLength);
+                using var ciphertextWithTag = await ReadFromPipeAsync(packetLength + tagLength, token);
+                if (ciphertextWithTag.Length == 0) return null;
 
                 // Decrypt straight into a pooled buffer (the plaintext is exactly
                 // packetLength bytes). The rental is returned in finally after
@@ -498,7 +504,7 @@ namespace FxSsh
                     // least 16 bytes; OpenSSH authenticates exactly 4).
                     _algorithms.ClientEncryption.DecryptAead(
                         lenBuf.ReadOnlySpan,
-                        ciphertextWithTag.Buffer.AsSpan(0, packetLength + tagLength),
+                        ciphertextWithTag.Array.AsSpan(0, packetLength + tagLength),
                         plaintext);
 
                     var paddingLength = plaintext[0];
@@ -524,7 +530,8 @@ namespace FxSsh
             // Layout: [length(4, plaintext)][encrypt(padding_length||payload||padding)][MAC].
             if (isEtm)
             {
-                using var lenBuf = SocketRead(4);
+                using var lenBuf = await ReadFromPipeAsync(4, token);
+                if (lenBuf.Length == 0) return null;
                 var lenSpan = lenBuf.Span;
                 var packetLength = lenSpan[0] << 24 | lenSpan[1] << 16 | lenSpan[2] << 8 | lenSpan[3];
                 if (packetLength < MinimumPacketLength || packetLength > MaximumPacketLength)
@@ -536,15 +543,14 @@ namespace FxSsh
                 }
 
                 // packetLength bytes of ciphertext: padding_length || payload || padding.
-                using var cipher = SocketRead(packetLength);
-                var encryptedSpan = cipher.ReadOnlySpan;
+                using var cipher = await ReadFromPipeAsync(packetLength, token);
+                if (cipher.Length == 0) return null;
 
                 // clientMacBuf is disposed right after the SequenceEqual
                 // comparison, before we touch the cipher buffer again.
-                using var clientMacBuf = SocketRead(_algorithms.ClientHmac.DigestLength);
-                Span<byte> mac = stackalloc byte[_algorithms.ClientHmac.DigestLength];
-                ComputeHmac(_algorithms.ClientHmac, lenBuf.ReadOnlySpan, encryptedSpan, _inboundPacketSequence, mac);
-                if (!clientMacBuf.Span.SequenceEqual(mac))
+                using var clientMacBuf = await ReadFromPipeAsync(_algorithms.ClientHmac.DigestLength, token);
+                if (clientMacBuf.Length == 0) return null;
+                if (!VerifyHmac(_algorithms.ClientHmac, lenBuf.ReadOnlySpan, cipher.ReadOnlySpan, _inboundPacketSequence, clientMacBuf.Span))
                 {
                     throw new SshConnectionException("Invalid MAC", DisconnectReason.MacError);
                 }
@@ -553,7 +559,7 @@ namespace FxSsh
                 // ArrayPool rental that may be larger than the packet, and
                 // the CTR keystream counter advances by the transform length -
                 // over-advancing would corrupt every subsequent packet.
-                _algorithms.ClientEncryption.Transform(cipher.Buffer, packetLength, cipher.Buffer);
+                _algorithms.ClientEncryption.Transform(cipher.Array, packetLength, cipher.Array);
                 var paddingLength = cipher.Span[0];
                 var dataLength = packetLength - paddingLength - 1;
                 var data = cipher.Memory.Slice(1, dataLength);
@@ -563,9 +569,10 @@ namespace FxSsh
             }
 
             var blockSize = (byte)(useAlg ? Math.Max(8, _algorithms.ClientEncryption.BlockBytesSize) : 8);
-            using var rawFirst = SocketRead(blockSize);
+            using var rawFirst = await ReadFromPipeAsync(blockSize, token);
+            if (rawFirst.Length == 0) return null;
             if (useAlg)
-                _algorithms.ClientEncryption.Transform(rawFirst.Buffer, blockSize, rawFirst.Buffer);
+                _algorithms.ClientEncryption.Transform(rawFirst.Array, blockSize, rawFirst.Array);
 
             var rawFirstSpan = rawFirst.Span;
             var packetLengthNonEtm = rawFirstSpan[0] << 24 | rawFirstSpan[1] << 16 | rawFirstSpan[2] << 8 | rawFirstSpan[3];
@@ -574,15 +581,16 @@ namespace FxSsh
                 throw new SshConnectionException(
                     string.Format("Invalid packet length {0}. Must be between {1} and {2}.",
                         (uint)packetLengthNonEtm, MinimumPacketLength, MaximumPacketLength),
-                        DisconnectReason.ProtocolError);
+                    DisconnectReason.ProtocolError);
             }
 
             var paddingLengthNonEtm = rawFirstSpan[4];
             var bytesToRead = packetLengthNonEtm - blockSize + 4;
 
-            using var followingBlocks = SocketRead(bytesToRead);
+            using var followingBlocks = await ReadFromPipeAsync(bytesToRead, token);
+            if (followingBlocks.Length == 0 && bytesToRead > 0) return null;
             if (useAlg && followingBlocks.Length > 0)
-                _algorithms.ClientEncryption.Transform(followingBlocks.Buffer, bytesToRead, followingBlocks.Buffer);
+                _algorithms.ClientEncryption.Transform(followingBlocks.Array, bytesToRead, followingBlocks.Array);
 
             // RFC 4253 section 6: payload length = packet_length - padding_length - 1
             // (the -1 is the padding_length byte itself). The AEAD/ETM paths
@@ -594,16 +602,16 @@ namespace FxSsh
             var fromFirst = Math.Min(dataLengthNonEtm, blockSize - 5);
             if (fromFirst > 0)
                 rawFirst.Span.Slice(5, fromFirst).CopyTo(dataNonEtm);
-            followingBlocks.Span.Slice(0, dataLengthNonEtm - fromFirst).CopyTo(dataNonEtm.AsSpan(fromFirst));
+            if (bytesToRead > 0)
+                followingBlocks.Span.Slice(0, dataLengthNonEtm - fromFirst).CopyTo(dataNonEtm.AsSpan(fromFirst));
 
             if (useAlg)
             {
                 // clientMacBuf is disposed after the SequenceEqual comparison,
                 // before we re-read the cipher for Decompress.
-                using var clientMacBuf = SocketRead(_algorithms.ClientHmac.DigestLength);
-                Span<byte> mac = stackalloc byte[_algorithms.ClientHmac.DigestLength];
-                ComputeHmac(_algorithms.ClientHmac, rawFirst.ReadOnlySpan, followingBlocks.ReadOnlySpan, _inboundPacketSequence, mac);
-                if (!clientMacBuf.Span.SequenceEqual(mac))
+                using var clientMacBuf = await ReadFromPipeAsync(_algorithms.ClientHmac.DigestLength, token);
+                if (clientMacBuf.Length == 0) return null;
+                if (!VerifyHmac(_algorithms.ClientHmac, rawFirst.ReadOnlySpan, followingBlocks.ReadOnlySpan, _inboundPacketSequence, clientMacBuf.Span))
                 {
                     throw new SshConnectionException("Invalid MAC", DisconnectReason.MacError);
                 }
@@ -664,7 +672,6 @@ namespace FxSsh
                 return;
             }
 
-            _hasBlockedMessagesWaitHandle.WaitOne();
             lock (_locker)
                 SendMessageInternal(message);
         }
@@ -724,90 +731,102 @@ namespace FxSsh
 
             var packetLength = (uint)payloadLength + paddingLength + 1;
 
-            // Frame the packet straight into the session's reusable plaintext
-            // buffer: [packet_length(4)][padding_length(1)][payload][padding].
-            // No per-packet frame array, no padding array, no ToByteArray -
-            // the frame lives in _sendScratchBuffer for the duration of the
-            // (serialized) send, then is overwritten by the next packet.
+            // Frame the packet into a rented plaintext buffer:
+            // [packet_length(4)][padding_length(1)][payload][padding]. The old
+            // shared _sendScratchBuffer is gone: the send pump consumes each
+            // wire buffer asynchronously, so every packet must own its buffers
+            // until the pump has written them (ArrayPool rentals returned by
+            // PooledBuffer.Dispose). No per-packet heap allocation.
             var framedLength = 4 + (int)packetLength;
-            var frame = _sendScratchBuffer.AsSpan(0, framedLength);
-            frame[0] = (byte)(packetLength >> 24);
-            frame[1] = (byte)(packetLength >> 16);
-            frame[2] = (byte)(packetLength >> 8);
-            frame[3] = (byte)packetLength;
-            frame[4] = paddingLength;
-            if (payload != null)
-                payload.AsSpan().CopyTo(frame.Slice(5));
-            else
-                // Copy the pooled writer's bytes into the frame; TryWriteTo
-                // also returns the writer's rental to the pool, so subsequent
-                // Dispose is a no-op.
-                payloadWriter.TryWriteTo(frame.Slice(5));
-            RandomNumberGenerator.Fill(frame.Slice(5 + payloadLength, paddingLength));
-
-            payloadWriter?.Dispose();
-
-            ReadOnlySpan<byte> wire;
-            if (useAlg)
+            var scratch = ArrayPool<byte>.Shared.Rent(framedLength);
+            try
             {
-                if (isAead)
+                var frame = scratch.AsSpan(0, framedLength);
+                frame[0] = (byte)(packetLength >> 24);
+                frame[1] = (byte)(packetLength >> 16);
+                frame[2] = (byte)(packetLength >> 8);
+                frame[3] = (byte)packetLength;
+                frame[4] = paddingLength;
+                if (payload != null)
+                    payload.AsSpan().CopyTo(frame.Slice(5));
+                else
+                    // Copy the pooled writer's bytes into the frame; TryWriteTo
+                    // also returns the writer's rental to the pool, so subsequent
+                    // Dispose is a no-op.
+                    payloadWriter.TryWriteTo(frame.Slice(5));
+                RandomNumberGenerator.Fill(frame.Slice(5 + payloadLength, paddingLength));
+
+                payloadWriter?.Dispose();
+
+                int finalLength = framedLength;
+                if (useAlg)
                 {
-                    // RFC 5647 section 3 + 7.3 AEAD layout:
-                    // [packet_length(4, plaintext)][ciphertext = encrypt(padding_length||payload||padding)][tag(16)].
-                    // The 4-byte plaintext packet_length is GCM's AAD
-                    // (authenticated but not encrypted). Encrypt straight into
-                    // the reusable _sendBuffer - no intermediate ciphertext
-                    // array per packet.
-                    var tagBytes = _algorithms.ServerEncryption.TagBytes;
-                    var cipherLen = framedLength - 4;
-                    var packet = _sendBuffer.AsSpan(0, 4 + cipherLen + tagBytes);
-                    frame.Slice(0, 4).CopyTo(packet);
-                    _algorithms.ServerEncryption.EncryptAead(
-                        frame.Slice(0, 4),
-                        frame.Slice(4),
-                        packet.Slice(4));
-                    wire = packet;
+                    if (isAead)
+                        finalLength += _algorithms.ServerEncryption.TagBytes;
+                    else
+                        finalLength += _algorithms.ServerHmac.DigestLength;
                 }
-                else if (_algorithms.ServerHmacIsEtm)
+
+                var sendBuf = ArrayPool<byte>.Shared.Rent(finalLength);
+                var wire = sendBuf.AsSpan(0, finalLength);
+
+                if (useAlg)
                 {
-                    // OpenSSH Encrypt-then-MAC (RFC 6668): packet_length is NOT
-                    // encrypted. Layout: [length(4, plaintext)][encrypt(padding_length||payload||padding)][MAC].
-                    // MAC covers seq || length || ciphertext.
-                    // Encrypt the body in place inside the scratch buffer
-                    // (frame[4..] becomes ciphertext), compute the MAC into
-                    // stackalloc, then assemble the wire packet in the reusable
-                    // _sendBuffer - no per-packet arrays.
-                    var macLength = _algorithms.ServerHmac.DigestLength;
-                    var cipherLen = framedLength - 4;
-                    _algorithms.ServerEncryption.Transform(_sendScratchBuffer, 4, cipherLen, _sendScratchBuffer, 4);
+                    if (isAead)
+                    {
+                        // RFC 5647 section 3 + 7.3 AEAD layout:
+                        // [packet_length(4, plaintext)][ciphertext = encrypt(padding_length||payload||padding)][tag(16)].
+                        // The 4-byte plaintext packet_length is GCM's AAD
+                        // (authenticated but not encrypted). Encrypt straight into
+                        // the rented sendBuf - no intermediate ciphertext array.
+                        frame.Slice(0, 4).CopyTo(wire);
+                        _algorithms.ServerEncryption.EncryptAead(
+                            frame.Slice(0, 4),
+                            frame.Slice(4),
+                            wire.Slice(4));
+                    }
+                    else if (_algorithms.ServerHmacIsEtm)
+                    {
+                        // OpenSSH Encrypt-then-MAC (RFC 6668): packet_length is NOT
+                        // encrypted. Layout: [length(4, plaintext)][encrypt(padding_length||payload||padding)][MAC].
+                        // MAC covers seq || length || ciphertext.
+                        // Encrypt the body in place inside the scratch buffer
+                        // (frame[4..] becomes ciphertext), compute the MAC into
+                        // stackalloc, then assemble the wire packet in sendBuf.
+                        var cipherLen = framedLength - 4;
+                        _algorithms.ServerEncryption.Transform(scratch, 4, cipherLen, scratch, 4);
 
-                    Span<byte> mac = stackalloc byte[macLength];
-                    ComputeHmac(_algorithms.ServerHmac, frame.Slice(0, 4), frame.Slice(4, cipherLen), _outboundPacketSequence, mac);
+                        Span<byte> mac = stackalloc byte[_algorithms.ServerHmac.DigestLength];
+                        ComputeHmac(_algorithms.ServerHmac, frame.Slice(0, 4), frame.Slice(4, cipherLen), _outboundPacketSequence, mac);
 
-                    var packet = _sendBuffer.AsSpan(0, 4 + cipherLen + macLength);
-                    frame.Slice(0, 4 + cipherLen).CopyTo(packet);
-                    mac.CopyTo(packet.Slice(4 + cipherLen));
-                    wire = packet;
+                        frame.Slice(0, 4 + cipherLen).CopyTo(wire);
+                        mac.CopyTo(wire.Slice(4 + cipherLen));
+                    }
+                    else
+                    {
+                        // RFC 4253: the whole packet is encrypted; MAC covers the plaintext.
+                        _algorithms.ServerEncryption.Transform(scratch, framedLength, sendBuf);
+                        Span<byte> mac = stackalloc byte[_algorithms.ServerHmac.DigestLength];
+                        ComputeHmac(_algorithms.ServerHmac, frame, ReadOnlySpan<byte>.Empty, _outboundPacketSequence, mac);
+                        mac.CopyTo(wire.Slice(framedLength));
+                    }
                 }
                 else
                 {
-                    // RFC 4253: the whole packet is encrypted; MAC covers the plaintext.
-                    var macLength = _algorithms.ServerHmac.DigestLength;
-                    var encrypted = _sendBuffer.AsSpan(0, framedLength + macLength);
-                    _algorithms.ServerEncryption.Transform(_sendScratchBuffer, framedLength, _sendBuffer);
-                    Span<byte> mac = stackalloc byte[macLength];
-                    ComputeHmac(_algorithms.ServerHmac, frame, ReadOnlySpan<byte>.Empty, _outboundPacketSequence, mac);
-                    mac.CopyTo(encrypted.Slice(framedLength));
-                    wire = encrypted;
+                    // Pre-KEX: no encryption; the plaintext frame goes out as-is.
+                    frame.CopyTo(wire);
+                }
+
+                if (!_sendChannel.Writer.TryWrite(new PooledBuffer(sendBuf, finalLength)))
+                {
+                    ArrayPool<byte>.Shared.Return(sendBuf);
+                    throw new SshConnectionException("Could not enqueue message for sending.", DisconnectReason.ByApplication);
                 }
             }
-            else
+            finally
             {
-                // Pre-KEX: no encryption; the plaintext frame goes out as-is.
-                wire = frame;
+                ArrayPool<byte>.Shared.Return(scratch);
             }
-
-            SocketWrite(wire);
 
             if (Log.IsEnabled(LogLevel.Trace))
             {
@@ -1046,8 +1065,6 @@ namespace FxSsh
             Log.Debug("New keys applied.");
             SendMessageInternal(new NewKeysMessage());
 
-            _hasBlockedMessagesWaitHandle.Reset();
-
             lock (_locker)
             {
                 _inboundFlow = 0;
@@ -1068,7 +1085,6 @@ namespace FxSsh
             }
 
             ContinueSendBlockedMessages();
-            _hasBlockedMessagesWaitHandle.Set();
         }
 
         /// <summary>
@@ -1213,27 +1229,22 @@ namespace FxSsh
             // RequestSuccess/Failure handler clears the counter; otherwise we
             // keep accumulating until MaxMissedProbes, then tear down.
             //
-            // SendGlobalKeepalive() can block on WaitForSocket(Poll) for up to
-            // the socket-receive timeout (30 s release, 1 d debug). During that
-            // window another concurrent timer callback may have disconnected the
-            // session via the MaxMissedProbes path and disposed the socket, causing
-            // ObjectDisposedException when the blocking Poll finally completes.
-            // Guard by re-checking _disconnected after the send returns, and
-            // protect the send itself against the disposed-socket race.
+            // SendGlobalKeepalive() is a non-blocking enqueue; it can still
+            // fail (channel completed / socket disposed) if a concurrent
+            // disconnect raced the probe. Guard the send and re-check
+            // _disconnected afterwards so a stale probe is never counted.
             try
             {
                 SendGlobalKeepalive();
             }
-            catch (ObjectDisposedException)
+            catch (Exception ex) when (ex is ObjectDisposedException or SshConnectionException)
             {
-                // The socket was disposed by another concurrent callback that
-                // already handled the disconnect - nothing more to do.
+                // The session was torn down by a concurrent disconnect - the
+                // probe went nowhere, nothing more to do.
                 return;
             }
 
-            // Re-check: another concurrent callback may have disconnected us
-            // while SendGlobalKeepalive was blocked on Poll. If so, our probe
-            // went nowhere; do not count it.
+            // Re-check: a concurrent disconnect may have raced the probe.
             if (_disconnected)
                 return;
 
@@ -1403,6 +1414,19 @@ namespace FxSsh
         private void ComputeHmac(HmacAlgorithm alg, ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, uint seq, Span<byte> destination)
         {
             alg.ComputeHash(a, b, seq, destination);
+        }
+
+        /// <summary>
+        /// Verify the inbound packet MAC <c>seq || a || b</c> against the
+        /// received tag. Extracted as a synchronous helper so the stackalloc
+        /// MAC buffer lives outside the async receive path (ref structs are
+        /// not allowed across await points on C# 12).
+        /// </summary>
+        private bool VerifyHmac(HmacAlgorithm alg, ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, uint seq, ReadOnlySpan<byte> expected)
+        {
+            Span<byte> mac = stackalloc byte[alg.DigestLength];
+            ComputeHmac(alg, a, b, seq, mac);
+            return mac.SequenceEqual(expected);
         }
 
         internal SshService RegisterService(string serviceName, UserAuthArgs auth = null)

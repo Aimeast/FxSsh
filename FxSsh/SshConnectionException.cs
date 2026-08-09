@@ -14,6 +14,12 @@ namespace FxSsh
             DisconnectReason = disconnectReason;
         }
 
+        public SshConnectionException(string message, DisconnectReason disconnectReason, Exception innerException)
+            : base(message, innerException)
+        {
+            DisconnectReason = disconnectReason;
+        }
+
         public DisconnectReason DisconnectReason { get; private set; }
 
         public override string ToString()

@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Threading;
+using System.Threading.Tasks;
 using FxSsh.Logging;
 using FxSsh.Messages.Connection;
 
@@ -14,6 +15,12 @@ namespace FxSsh.Services
         protected EventWaitHandle _sendingWindowWaitHandle = new ManualResetEvent(false);
         private readonly object _windowLocker = new object();
         private bool _forceClosed;
+
+        // Async window signal for SendDataAsync. ClientAdjustWindow and
+        // ForceClose swap in a fresh TCS and complete the old one so every
+        // awaiting sender re-checks the window; the synchronous SendData
+        // waiters are woken by the Monitor.PulseAll under the same lock.
+        private TaskCompletionSource<bool> _windowTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public Channel(ConnectionService connectionService,
             uint clientChannelId, uint clientInitialWindowSize, uint clientMaxPacketSize,
@@ -172,6 +179,89 @@ namespace FxSsh.Services
             } while (total > 0);
         }
 
+        /// <summary>
+        /// Async equivalent of <see cref="SendData"/> for use from async pumps
+        /// (e.g. PortForwardingService bridges). When the peer's receive window
+        /// is exhausted it awaits the window signal instead of blocking a
+        /// thread in Monitor.Wait; the chunking, window accounting and
+        /// zero-copy slicing are identical to the synchronous path.
+        /// </summary>
+        public async Task SendDataAsync(ReadOnlyMemory<byte> data)
+        {
+            if (data.Length == 0)
+            {
+                return;
+            }
+
+            // Same buffering semantics as SendData: server-initiated channels
+            // buffer outbound bytes until the peer's OPEN_CONFIRMATION.
+            if (PendingConfirmation)
+            {
+                _pendingSends.Add(data);
+                return;
+            }
+
+            var msg = new ChannelDataMessage();
+            msg.RecipientChannel = ClientChannelId;
+
+            var total = (uint)data.Length;
+            var offset = 0L;
+            while (total > 0)
+            {
+                uint packetSize;
+                lock (_windowLocker)
+                {
+                    packetSize = Math.Min(Math.Min(ClientWindowSize, ClientMaxPacketSize), total);
+                    if (packetSize > 0)
+                    {
+                        ClientWindowSize -= packetSize;
+                    }
+                }
+
+                if (packetSize == 0)
+                {
+                    // Peer's receive window is exhausted. Await the window
+                    // signal (completed by ClientAdjustWindow / ForceClose)
+                    // instead of Monitor.Wait, so no thread is blocked. The
+                    // loop re-checks the window after every wake-up, exactly
+                    // like the synchronous path re-evaluates after PulseAll.
+                    await WaitForWindowAsync();
+                    continue;
+                }
+
+                // Zero-copy slice: same framing as SendData.
+                msg.Data = data.Slice((int)offset, (int)packetSize);
+                _connectionService._session.SendMessage(msg);
+
+                total -= packetSize;
+                offset += packetSize;
+            }
+        }
+
+        /// <summary>
+        /// Await the peer's receive window to reopen. Returns when
+        /// ClientWindowSize &gt; 0 or throws ObjectDisposedException after the
+        /// channel was force-closed (matching the synchronous SendData
+        /// teardown semantics).
+        /// </summary>
+        private async ValueTask WaitForWindowAsync()
+        {
+            while (true)
+            {
+                TaskCompletionSource<bool> signal;
+                lock (_windowLocker)
+                {
+                    if (ClientWindowSize > 0)
+                        return;
+                    if (_forceClosed)
+                        throw new ObjectDisposedException(nameof(Channel));
+                    signal = _windowTcs;
+                }
+                await signal.Task;
+                // Spurious wake-ups are safe: loop and re-evaluate the window.
+            }
+        }
+
         public void SendEof()
         {
             if (ServerMarkedEof)
@@ -258,6 +348,7 @@ namespace FxSsh.Services
 
         internal void ClientAdjustWindow(uint bytesToAdd)
         {
+            TaskCompletionSource<bool> signal;
             lock (_windowLocker)
             {
                 ClientWindowSize += bytesToAdd;
@@ -268,7 +359,15 @@ namespace FxSsh.Services
                 // Set/Thread.Sleep(1)/Reset pulse that stalled the SSH receive
                 // thread once per WINDOW_ADJUST.
                 Monitor.PulseAll(_windowLocker);
+
+                // Also wake async senders parked in WaitForWindowAsync. Swap
+                // in a fresh TCS and complete the old one so every awaiting
+                // sender re-checks the window.
+                signal = _windowTcs;
+                _windowTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             }
+
+            signal.TrySetResult(true);
         }
 
         private void ServerAttemptAdjustWindow(uint messageLength)
@@ -320,6 +419,7 @@ namespace FxSsh.Services
             // when the client's CHANNEL_CLOSE arrives (or vice versa), plus
             // any external listener wired onto CloseReceived can re-enter it.
             // Guard with a flag so teardown happens exactly once.
+            TaskCompletionSource<bool> signal;
             lock (_windowLocker)
             {
                 if (_forceClosed)
@@ -330,7 +430,14 @@ namespace FxSsh.Services
                 // re-checks _forceClosed and throws ObjectDisposedException,
                 // matching the previous "waiting on a closed handle" semantics.
                 Monitor.PulseAll(_windowLocker);
+
+                // Also wake async senders parked in WaitForWindowAsync; they
+                // re-check _forceClosed and throw ObjectDisposedException.
+                signal = _windowTcs;
+                _windowTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
             }
+
+            signal.TrySetResult(true);
 
             _connectionService.RemoveChannel(this);
 

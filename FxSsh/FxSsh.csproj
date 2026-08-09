@@ -2,6 +2,14 @@
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
+    <!-- The async session transport uses ref struct locals (Span) in async
+         receive methods; C# 13 (CS9202 feature) permits those when they do
+         not cross await points. Requires a Roslyn from .NET 9+ SDK. -->
+    <LangVersion>13.0</LangVersion>
+    <!-- NativeAOT / trimming compatibility: IL2xxx warnings surface any new
+         reflection/dynamic-dispatch that would break AOT publish. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <Authors>Aimeast</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
@@ -14,5 +22,14 @@
     <AssemblyOriginatorKeyFile>FxSsh.snk</AssemblyOriginatorKeyFile>
     <Copyright>Copyright (c) Aimeast 2015-$([System.DateTime]::Now.Year)</Copyright>
   </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The async session transport uses System.IO.Pipelines (receive pipe)
+         and System.Threading.Channels (send channel); both are part of the
+         .NET shared framework but Surface-AOT/trimming analysis needs the
+         explicit package reference on net8.0. -->
+    <PackageReference Include="System.IO.Pipelines" Version="8.0.0" />
+    <PackageReference Include="System.Threading.Channels" Version="8.0.0" />
+  </ItemGroup>
 
 </Project>

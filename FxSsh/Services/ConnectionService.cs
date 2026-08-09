@@ -1,11 +1,11 @@
 ﻿using System;
-using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using FxSsh.Logging;
 using FxSsh.Messages;
@@ -18,7 +18,8 @@ namespace FxSsh.Services
         private readonly object _locker = new();
         private readonly List<Channel> _channels = [];
         private readonly UserAuthArgs _auth = null;
-        private readonly BlockingCollection<ConnectionServiceMessage> _messageQueue = [];
+        private readonly System.Threading.Channels.Channel<ConnectionServiceMessage> _messageChannel =
+            System.Threading.Channels.Channel.CreateUnbounded<ConnectionServiceMessage>(new UnboundedChannelOptions { SingleReader = true });
         private readonly CancellationTokenSource _messageCts = new();
 
         private int _serverChannelCounter = -1;
@@ -36,7 +37,7 @@ namespace FxSsh.Services
 
             _auth = auth;
 
-            Task.Run(MessageLoop);
+            Task.Run(MessageLoopAsync);
         }
 
         public event EventHandler<CommandRequestedArgs> CommandOpened;
@@ -54,6 +55,7 @@ namespace FxSsh.Services
         protected internal override void CloseService()
         {
             _messageCts.Cancel();
+            _messageChannel.Writer.TryComplete();
 
             lock (_locker)
             {
@@ -77,23 +79,59 @@ namespace FxSsh.Services
             ArgumentNullException.ThrowIfNull(message);
 
             if (message is ChannelWindowAdjustMessage)
-                this.HandleMessage((dynamic)message);
+                // Window adjust must be processed inline (before the queued
+                // messages ahead of it) so send-window accounting stays exact.
+                Dispatch(message);
             else
-                _messageQueue.Add(message);
+                _messageChannel.Writer.TryWrite(message);
         }
 
-        private void MessageLoop()
+        private async Task MessageLoopAsync()
         {
             try
             {
-                while (true)
+                await foreach (var message in _messageChannel.Reader.ReadAllAsync(_messageCts.Token))
                 {
-                    var message = _messageQueue.Take(_messageCts.Token);
-                    this.HandleMessage((dynamic)message);
+                    Dispatch(message);
                 }
             }
             catch (OperationCanceledException)
             {
+            }
+        }
+
+        /// <summary>
+        /// Compile-time dispatch replacing the former (dynamic) binder.
+        /// Concrete subclasses are matched before their ChannelOpenMessage /
+        /// ChannelRequestMessage bases, mirroring the old most-specific-overload
+        /// dynamic binding (e.g. EnvMessage/PtyRequestMessage etc. reach their
+        /// own handlers rather than the ChannelRequestMessage base).
+        /// </summary>
+        private void Dispatch(ConnectionServiceMessage message)
+        {
+            // Concrete subclasses first: a base-case match (ChannelOpenMessage /
+            // ChannelRequestMessage) would otherwise swallow its derived types.
+            switch (message)
+            {
+                case ForwardedTcpIpMessage m: HandleMessage(m); break;
+                case DirectTcpIpMessage m: HandleMessage(m); break;
+                case SessionOpenMessage m: HandleMessage(m); break;
+                case ChannelOpenMessage m: HandleMessage(m); break;
+                case EnvMessage m: HandleMessage(m); break;
+                case PtyRequestMessage m: HandleMessage(m); break;
+                case WindowChangeMessage m: HandleMessage(m); break;
+                case ShellRequestMessage m: HandleMessage(m); break;
+                case CommandRequestMessage m: HandleMessage(m); break;
+                case SubsystemRequestMessage m: HandleMessage(m); break;
+                case ChannelRequestMessage m: HandleMessage(m); break;
+                case ShouldIgnoreMessage m: HandleMessage(m); break;
+                case GlobalRequestMessage m: HandleMessage(m); break;
+                case ChannelOpenConfirmationMessage m: HandleMessage(m); break;
+                case ChannelOpenFailureMessage m: HandleMessage(m); break;
+                case ChannelDataMessage m: HandleMessage(m); break;
+                case ChannelWindowAdjustMessage m: HandleMessage(m); break;
+                case ChannelEofMessage m: HandleMessage(m); break;
+                case ChannelCloseMessage m: HandleMessage(m); break;
             }
         }
 

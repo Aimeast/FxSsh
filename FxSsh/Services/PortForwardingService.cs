@@ -1,8 +1,10 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using FxSsh.Logging;
 
@@ -18,6 +20,11 @@ namespace FxSsh.Services
     /// channel data into the forwarded socket. Closing the service (via
     /// "cancel-tcpip-forward" or session teardown) stops the listener and
     /// tears down any in-flight forwarded channels.
+    ///
+    /// The accept loop and both bridge pumps are fully async (AcceptSocketAsync /
+    /// ReceiveAsync / SendAsync / Channel.SendDataAsync): no thread is blocked
+    /// on socket I/O, so thousands of forwarded connections do not consume a
+    /// thread each.
     /// </summary>
     public sealed class PortForwardingService : IDisposable
     {
@@ -65,18 +72,19 @@ namespace FxSsh.Services
             _listener.Start();
             BoundPort = (uint)((IPEndPoint)_listener.LocalEndpoint).Port;
             Log.Info($"Forwarding listener bound at {BoundAddress}:{BoundPort}.");
-            Task.Run(AcceptLoop);
+            _ = AcceptLoopAsync();
         }
 
-        private void AcceptLoop()
+        private async Task AcceptLoopAsync()
         {
             while (!_cts.IsCancellationRequested)
             {
                 Socket client;
                 try
                 {
-                    client = _listener.AcceptSocket();
+                    client = await _listener.AcceptSocketAsync(_cts.Token);
                 }
+                catch (OperationCanceledException) { break; }
                 catch (SocketException) { break; }   // listener stopped
                 catch (ObjectDisposedException) { break; }
 
@@ -105,88 +113,115 @@ namespace FxSsh.Services
                     continue;
                 }
 
-                Bridge(channel, client);
+                _ = BridgeAsync(channel, client);
             }
         }
 
-        /// <summary>Wire a forwarded channel to a socket: socket->channel data, channel close->socket close.</summary>
-        private void Bridge(Channel channel, Socket socket)
+        /// <summary>
+        /// Wire a forwarded channel to a socket with two async pumps:
+        /// channel->socket (send queue consumed by an async sender) and
+        /// socket->channel (async receive loop feeding Channel.SendDataAsync).
+        /// No thread is blocked on socket I/O.
+        /// </summary>
+        private async Task BridgeAsync(Channel channel, Socket socket)
         {
             Log.Debug($"Bridge established: channel {channel.ServerChannelId} <-> {socket.RemoteEndPoint}.");
             lock (_bridgeLocker)
                 _bridges.Add((channel, socket));
 
             // The channel DataReceived callback runs on the SSH
-            // ConnectionService.MessageLoop thread. It must never block there:
-            // the same thread also sends the peer's window adjustments, so a
+            // ConnectionService.MessageLoop task. It must never block there:
+            // the same task also sends the peer's window adjustments, so a
             // blocking socket.Send would stall the peer's upload (its send
-            // window is replenished by this thread). Queue the data instead
-            // and let a dedicated send thread serialize socket.Send.
+            // window is replenished by this task). Queue the data instead
+            // and let the async send pump serialize socket.SendAsync.
             //
             // The incoming ReadOnlyMemory is a slice over the SSH receive
             // buffer, which is recycled by the next ReceiveMessage on the
-            // message-loop thread. The send thread runs asynchronously, so
+            // message-loop task. The send pump runs asynchronously, so
             // we MUST hand it an independent copy (ToArray) - the slice is
             // not guaranteed live past the callback's return. This is the one
             // unavoidable copy on the inbound forwarding path, and it lives
-            // exactly until socket.Send consumes it, then is GC'd.
-            var sendQueue = new System.Collections.Concurrent.BlockingCollection<byte[]>();
-            Task.Run(() =>
-            {
-                try
-                {
-                    foreach (var data in sendQueue.GetConsumingEnumerable())
-                    {
-                        try { if (socket.Connected) socket.Send(data); } catch { }
-                    }
-                }
-                catch { }
-            });
+            // exactly until the send pump consumes it, then is GC'd.
+            var sendQueue = System.Threading.Channels.Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
 
             channel.DataReceived += (_, data) =>
             {
-                try { sendQueue.Add(data.ToArray()); } catch { }
+                try { sendQueue.Writer.TryWrite(data.ToArray()); } catch { }
             };
             channel.CloseReceived += (_, _) =>
             {
                 try
                 {
-                    sendQueue.CompleteAdding();
+                    sendQueue.Writer.TryComplete();
                     if (socket.Connected) socket.Shutdown(SocketShutdown.Send);
                 }
                 catch { }
             };
 
+            var sendTask = SendLoopAsync(sendQueue.Reader, socket);
+
             // Socket -> channel pump.
-            Task.Run(() =>
+            var buf = new byte[1024 * 32];
+            try
             {
-                var buf = new byte[1024 * 32];
-                try
+                while (socket.Connected && !_cts.IsCancellationRequested)
                 {
-                    while (socket.Connected && !_cts.IsCancellationRequested)
+                    int n;
+                    try
                     {
-                        int n;
-                        try { n = socket.Receive(buf); }
-                        catch (SocketException) { break; }
-                        catch (ObjectDisposedException) { break; }
-
-                        if (n <= 0) break;
-                        channel.SendData(n == buf.Length ? buf : buf[..n]);
+                        n = await socket.ReceiveAsync(buf.AsMemory(), SocketFlags.None, _cts.Token);
                     }
+                    catch (OperationCanceledException) { break; }
+                    catch (SocketException) { break; }
+                    catch (ObjectDisposedException) { break; }
+
+                    if (n <= 0) break;
+                    await channel.SendDataAsync(n == buf.Length ? buf : buf[..n]);
                 }
-                catch { }
-                finally
+            }
+            catch
+            {
+            }
+            finally
+            {
+                channel.SendEof();
+                try { socket.Close(); } catch { }
+
+                lock (_bridgeLocker)
+                    _bridges.Remove((channel, socket));
+
+                Log.Debug($"Bridge closed: channel {channel.ServerChannelId}.");
+                ForwardedChannelClosed?.Invoke(this, channel);
+            }
+
+            await sendTask;
+        }
+
+        /// <summary>
+        /// Serialize socket.SendAsync over the channel->socket queue. Runs as
+        /// a single async task so the ConnectionService message loop never
+        /// blocks on the local TCP peer.
+        /// </summary>
+        private async Task SendLoopAsync(ChannelReader<byte[]> sendQueue, Socket socket)
+        {
+            try
+            {
+                await foreach (var data in sendQueue.ReadAllAsync(_cts.Token))
                 {
-                    channel.SendEof();
-                    try { socket.Close(); } catch { }
-
-                    lock (_bridgeLocker)
-                        _bridges.Remove((channel, socket));
-
-                    Log.Debug($"Bridge closed: channel {channel.ServerChannelId}.");
-                    ForwardedChannelClosed?.Invoke(this, channel);
+                    try
+                    {
+                        if (data.Length > 0 && socket.Connected)
+                            await socket.SendAsync(data, SocketFlags.None, _cts.Token);
+                    }
+                    catch { }
                 }
-            });
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception)
+            {
+                // Socket closed or canceled; nothing to do.
+            }
         }
 
         public void Dispose()
