@@ -21,6 +21,7 @@ namespace MiniTerm
         private Process process;
         private FileStream writer;
         private FileStream reader;
+        private readonly SemaphoreSlim _inputLock = new(1, 1);
 
         public Terminal(string command, int windowWidth, int windowHeight)
         {
@@ -61,7 +62,7 @@ namespace MiniTerm
                 },
                 null, Timeout.Infinite, executeOnlyOnce: true);
 
-            Task.Run(() =>
+            Task.Run(async () =>
             {
                 var buf = new byte[1024 * 4];
                 try
@@ -71,7 +72,7 @@ namespace MiniTerm
                         int length;
                         try
                         {
-                            length = reader.Read(buf, 0, buf.Length);
+                            length = await reader.ReadAsync(buf.AsMemory());
                         }
                         catch (IOException)
                         {
@@ -87,7 +88,10 @@ namespace MiniTerm
                         }
                         if (length == 0)
                             break;
-                        DataReceived?.Invoke(this, buf.Take(length).ToArray());
+                        // Copy: the read buffer is reused on the next ReadAsync,
+                        // but the async subscriber (Channel.SendDataAsync) may
+                        // still be awaiting when that happens.
+                        DataReceived?.Invoke(this, buf.AsSpan(0, length).ToArray());
                     }
                 }
                 finally
@@ -104,11 +108,27 @@ namespace MiniTerm
             });
         }
 
-        public void OnInput(ReadOnlyMemory<byte> data)
+        /// <summary>
+        /// Write SSH channel input into the pseudo console asynchronously.
+        /// Called from the SSH ConnectionService message loop task (via the
+        /// channel DataReceived event); never blocks it. Writes are serialized
+        /// so interleaved SSH packets cannot interleave bytes in the PTY input
+        /// stream, and the slice is copied because the async write holds the
+        /// memory across an await while the SSH receive buffer is recycled.
+        /// </summary>
+        public async Task OnInputAsync(ReadOnlyMemory<byte> data)
         {
-            var span = data.Span;
-            writer.Write(span);
-            writer.Flush();
+            var copy = data.ToArray();
+            await _inputLock.WaitAsync();
+            try
+            {
+                await writer.WriteAsync(copy);
+                await writer.FlushAsync();
+            }
+            finally
+            {
+                _inputLock.Release();
+            }
         }
 
         public void OnClose()

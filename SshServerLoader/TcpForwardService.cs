@@ -1,19 +1,26 @@
 ﻿using System;
-using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
 using System.Net.Sockets;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace SshServerLoader
 {
+    /// <summary>
+    /// Client side of SSH "direct-tcpip" forwarding: the socket that connects
+    /// to the local TCP target requested by the peer. Both pumps are async
+    /// (ConnectAsync / ReceiveAsync / SendAsync) and the SSH->target data path
+    /// is a Channel consumed by a single async sender, so no thread is blocked
+    /// on socket I/O - the forwarding channel is fully async like
+    /// PortForwardingService on the reverse-forward side.
+    /// </summary>
     public class TcpForwardService
     {
         private Socket _socket;
         private string _host;
         private int _port;
-        private readonly BlockingCollection<byte[]> _sendQueue = [];
+        private readonly Channel<byte[]> _sendChannel =
+            Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
         private readonly CancellationTokenSource _cts = new();
         private bool _closed;
 
@@ -24,42 +31,85 @@ namespace SshServerLoader
             _port = port;
         }
 
-        // DataReceived fires on the local socket->channel pump thread and
-        // feeds Channel.SendData, which now takes ReadOnlyMemory<byte>. A
-        // byte[] is implicitly convertible to ReadOnlyMemory<byte>, so keep
-        // the event payload as byte[] - the own-socket read buffer is the
-        // producer's to manage, and the channel slicing is zero-copy.
+        // DataReceived fires on the async socket->SSH pump task. The payload
+        // is an independent copy (ToArray) because the pump reuses its read
+        // buffer on the next ReceiveAsync - the async consumer may still be
+        // awaiting Channel.SendDataAsync when that happens, so a zero-copy
+        // slice would alias recycled memory.
         public event EventHandler<byte[]> DataReceived;
         public event EventHandler CloseReceived;
 
         public void Start()
         {
-            Task.Run(() =>
+            _ = RunAsync();
+        }
+
+        private async Task RunAsync()
+        {
+            try
             {
-                try
+                await _socket.ConnectAsync(_host, _port);
+
+                // Dedicated async send pump: serializes socket.SendAsync so
+                // the SSH message loop task never blocks on the local TCP peer.
+                var sendTask = SendLoopAsync();
+
+                var bytes = new byte[1024 * 64];
+                while (!_cts.IsCancellationRequested)
                 {
-                    MessageLoop();
+                    int n;
+                    try
+                    {
+                        n = await _socket.ReceiveAsync(bytes.AsMemory(), SocketFlags.None, _cts.Token);
+                    }
+                    catch (OperationCanceledException) { break; }
+                    catch (SocketException) { break; }
+                    catch (ObjectDisposedException) { break; }
+
+                    if (n <= 0) break;
+                    DataReceived?.Invoke(this, bytes.AsSpan(0, n).ToArray());
                 }
-                catch
+                CloseReceived?.Invoke(this, EventArgs.Empty);
+                Finish();
+
+                await sendTask;
+            }
+            catch
+            {
+                OnClose();
+            }
+        }
+
+        private async Task SendLoopAsync()
+        {
+            try
+            {
+                await foreach (var data in _sendChannel.Reader.ReadAllAsync(_cts.Token))
                 {
-                    OnClose();
+                    if (data.Length == 0)
+                        continue;
+                    await _socket.SendAsync(data, SocketFlags.None, _cts.Token);
                 }
-            });
+            }
+            catch
+            {
+                // Socket closed or canceled; nothing to do.
+            }
         }
 
         /// <summary>
-        /// Called on the SSH ConnectionService.MessageLoop thread. Must never
-        /// block that thread: the SSH receive loop and window adjustments share
+        /// Called on the SSH ConnectionService.MessageLoop task. Must never
+        /// block that task: the SSH receive loop and window adjustments share
         /// it, so a blocking socket send here would stall the peer's upload
-        /// (its send window is replenished by the same thread). Instead the
-        /// data is queued and flushed by a dedicated send thread.
+        /// (its send window is replenished by the same task). Instead the
+        /// data is queued and flushed by the async send pump.
         /// </summary>
-        /// <param name="data">Slice over the SSH receive buffer; the send thread runs asynchronously so we copy it into the queue rather than retain the slice past the callback's return.</param>
+        /// <param name="data">Slice over the SSH receive buffer; the send pump runs asynchronously so we copy it into the queue rather than retain the slice past the callback's return.</param>
         public void OnData(ReadOnlyMemory<byte> data)
         {
             try
             {
-                _sendQueue.Add(data.ToArray());
+                _sendChannel.Writer.TryWrite(data.ToArray());
             }
             catch
             {
@@ -69,52 +119,12 @@ namespace SshServerLoader
 
         public void OnClose()
         {
+            _sendChannel.Writer.TryComplete();
             try
             {
                 _socket.Shutdown(SocketShutdown.Send);
             }
             catch { }
-        }
-
-        private void MessageLoop()
-        {
-            _socket.Connect(_host, _port);
-
-            // Dedicated send thread: serializes socket.Send so the SSH
-            // MessageLoop thread never blocks on the local TCP peer.
-            Task.Run(SendLoop);
-
-            var bytes = new byte[1024 * 64];
-            while (true)
-            {
-                var len = _socket.Receive(bytes);
-                if (len <= 0)
-                    break;
-
-                var data = bytes.Length != len
-                    ? bytes.Take(len).ToArray()
-                    : bytes;
-                DataReceived?.Invoke(this, data);
-            }
-            CloseReceived?.Invoke(this, EventArgs.Empty);
-            Finish();
-        }
-
-        private void SendLoop()
-        {
-            try
-            {
-                foreach (var data in _sendQueue.GetConsumingEnumerable(_cts.Token))
-                {
-                    if (data.Length == 0)
-                        continue;
-                    _socket.Send(data);
-                }
-            }
-            catch
-            {
-                // Socket closed or canceled; nothing to do.
-            }
         }
 
         private void Finish()

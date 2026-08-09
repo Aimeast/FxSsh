@@ -1,14 +1,25 @@
 ﻿using System;
 using System.Diagnostics;
-using System.Linq;
+using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 
 namespace SshServerLoader
 {
+    /// <summary>
+    /// Bridges an SSH session channel to a child process (exec / subsystem /
+    /// git). Both directions are async: stdout is pumped with ReadAsync and
+    /// SSH->stdin data is queued into a Channel drained by a single async
+    /// writer, so no thread is blocked on the process pipes. OnData stays
+    /// synchronous (enqueue only) so the SSH message loop task never waits on
+    /// a pipe write, and the Channel preserves packet order.
+    /// </summary>
     public class CommandService
     {
         private Process _process = null;
         private ProcessStartInfo _startInfo = null;
+        private readonly Channel<byte[]> _stdinChannel =
+            Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
 
         public CommandService(string command, string args)
         {
@@ -29,38 +40,77 @@ namespace SshServerLoader
         public void Start()
         {
             _process = Process.Start(_startInfo);
-            Task.Run(() => MessageLoop());
+            _ = MessageLoopAsync();
+            _ = StdinLoopAsync();
         }
 
+        /// <summary>
+        /// Queue SSH channel input for the child's stdin. Called on the SSH
+        /// ConnectionService message loop task (via the channel DataReceived
+        /// event); only enqueues, never blocks. The slice is copied because
+        /// the async writer consumes it after the SSH receive buffer has been
+        /// recycled.
+        /// </summary>
         public void OnData(ReadOnlyMemory<byte> data)
         {
-            var stream = _process.StandardInput.BaseStream;
-            var span = data.Span;
-            // Synchronous write on the SSH message loop thread; the slice is
-            // live for the duration of this call, so write straight from the
-            // SSH receive buffer without an intermediate copy.
-            stream.Write(span);
-            stream.Flush();
+            try
+            {
+                _stdinChannel.Writer.TryWrite(data.ToArray());
+            }
+            catch
+            {
+            }
         }
 
         public void OnClose()
         {
-            _process.StandardInput.BaseStream.Close();
+            _stdinChannel.Writer.TryComplete();
+            try { _process.StandardInput.BaseStream.Close(); } catch { }
         }
 
-        private void MessageLoop()
+        /// <summary>
+        /// Single async writer draining the stdin queue in arrival order;
+        /// serializes WriteAsync so interleaved SSH packets cannot corrupt
+        /// the process input stream.
+        /// </summary>
+        private async Task StdinLoopAsync()
+        {
+            try
+            {
+                var stream = _process.StandardInput.BaseStream;
+                await foreach (var data in _stdinChannel.Reader.ReadAllAsync())
+                {
+                    await stream.WriteAsync(data);
+                    await stream.FlushAsync();
+                }
+            }
+            catch
+            {
+                // Stdin closed (process exited or OnClose); nothing to do.
+            }
+        }
+
+        private async Task MessageLoopAsync()
         {
             var bytes = new byte[1024 * 64];
-            while (true)
+            try
             {
-                var len = _process.StandardOutput.BaseStream.Read(bytes, 0, bytes.Length);
-                if (len <= 0)
-                    break;
+                while (true)
+                {
+                    var len = await _process.StandardOutput.BaseStream.ReadAsync(bytes.AsMemory());
+                    if (len <= 0)
+                        break;
 
-                var data = bytes.Length != len
-                    ? bytes.Take(len).ToArray()
-                    : bytes;
-                DataReceived?.Invoke(this, data);
+                    // Copy: the read buffer is reused on the next ReadAsync,
+                    // but the async subscriber (Channel.SendDataAsync) may
+                    // still be awaiting when that happens.
+                    var data = bytes.AsSpan(0, len).ToArray();
+                    DataReceived?.Invoke(this, data);
+                }
+            }
+            catch
+            {
+                // Pipes closed (e.g. process killed); report EOF/exit below.
             }
             EofReceived?.Invoke(this, EventArgs.Empty);
             CloseReceived?.Invoke(this, (uint)_process.ExitCode);
