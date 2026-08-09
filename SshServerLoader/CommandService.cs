@@ -9,17 +9,26 @@ namespace SshServerLoader
     /// <summary>
     /// Bridges an SSH session channel to a child process (exec / subsystem /
     /// git). Both directions are async: stdout is pumped with ReadAsync and
-    /// SSH->stdin data is queued into a Channel drained by a single async
-    /// writer, so no thread is blocked on the process pipes. OnData stays
-    /// synchronous (enqueue only) so the SSH message loop task never waits on
-    /// a pipe write, and the Channel preserves packet order.
+    /// SSH->stdin data is queued into a BOUNDED Channel drained by a single
+    /// async writer, so no thread is blocked on the process pipes and memory
+    /// is capped even if the child stops reading stdin. When the queue is
+    /// full, OnData blocks the SSH message loop task (stopping the SSH
+    /// receive-window replenish), propagating backpressure to the client.
     /// </summary>
     public class CommandService
     {
         private Process _process = null;
         private ProcessStartInfo _startInfo = null;
-        private readonly Channel<byte[]> _stdinChannel =
-            Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
+        // Bounded queue: at most 16 in-flight 64KiB chunks (~1 MiB), so a
+        // child that stops reading stdin cannot balloon memory. FullMode.Wait
+        // makes Writer.Write block (backpressure) instead of dropping data.
+        private static readonly BoundedChannelOptions StdinChannelOptions = new(16)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.Wait,
+        };
+
+        private readonly Channel<byte[]> _stdinChannel = Channel.CreateBounded<byte[]>(StdinChannelOptions);
 
         public CommandService(string command, string args)
         {
@@ -46,16 +55,26 @@ namespace SshServerLoader
 
         /// <summary>
         /// Queue SSH channel input for the child's stdin. Called on the SSH
-        /// ConnectionService message loop task (via the channel DataReceived
-        /// event); only enqueues, never blocks. The slice is copied because
-        /// the async writer consumes it after the SSH receive buffer has been
-        /// recycled.
+        /// ConnectionService message loop task. The queue is bounded
+        /// (FullMode.Wait), so a blocking Write here is the intended
+        /// backpressure path: if the child stops reading stdin, the message
+        /// loop task pauses, which stops replenishing the SSH receive window
+        /// and throttles the client. OnClose completes the queue, unblocking
+        /// any pending write. The slice is copied because the async writer
+        /// consumes it after the SSH receive buffer has been recycled.
         /// </summary>
         public void OnData(ReadOnlyMemory<byte> data)
         {
             try
             {
-                _stdinChannel.Writer.TryWrite(data.ToArray());
+                // Synchronous wait on the bounded channel: the message loop
+                // task has no SynchronizationContext, so GetAwaiter().GetResult()
+                // safely blocks until the stdin writer frees a slot
+                // (backpressure) or the queue is completed (teardown).
+                _stdinChannel.Writer.WriteAsync(data.ToArray()).AsTask().GetAwaiter().GetResult();
+            }
+            catch (ChannelClosedException)
+            {
             }
             catch
             {

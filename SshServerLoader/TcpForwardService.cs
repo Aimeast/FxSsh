@@ -10,17 +10,28 @@ namespace SshServerLoader
     /// Client side of SSH "direct-tcpip" forwarding: the socket that connects
     /// to the local TCP target requested by the peer. Both pumps are async
     /// (ConnectAsync / ReceiveAsync / SendAsync) and the SSH->target data path
-    /// is a Channel consumed by a single async sender, so no thread is blocked
-    /// on socket I/O - the forwarding channel is fully async like
-    /// PortForwardingService on the reverse-forward side.
+    /// is a BOUNDED Channel drained by a single async sender, so no thread is
+    /// blocked on socket I/O and memory is capped even when the local peer
+    /// consumes slowly. When the queue is full, OnData blocks the SSH message
+    /// loop task (which stops replenishing the SSH receive window), so
+    /// backpressure propagates to the client's TCP send buffer instead of
+    /// growing the queue without limit.
     /// </summary>
     public class TcpForwardService
     {
+        // Bounded queue: at most 16 in-flight 64KiB chunks (~1 MiB) per
+        // forward, so a slow local peer cannot balloon memory. FullMode.Wait
+        // makes Writer.Write block (backpressure) instead of dropping data.
+        private static readonly BoundedChannelOptions SendChannelOptions = new(16)
+        {
+            SingleReader = true,
+            FullMode = BoundedChannelFullMode.Wait,
+        };
+
         private Socket _socket;
         private string _host;
         private int _port;
-        private readonly Channel<byte[]> _sendChannel =
-            Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
+        private readonly Channel<byte[]> _sendChannel = Channel.CreateBounded<byte[]>(SendChannelOptions);
         private readonly CancellationTokenSource _cts = new();
         private bool _closed;
 
@@ -99,17 +110,32 @@ namespace SshServerLoader
 
         /// <summary>
         /// Called on the SSH ConnectionService.MessageLoop task. Must never
-        /// block that task: the SSH receive loop and window adjustments share
-        /// it, so a blocking socket send here would stall the peer's upload
-        /// (its send window is replenished by the same task). Instead the
-        /// data is queued and flushed by the async send pump.
+        /// block that task indefinitely: the SSH receive loop and window
+        /// adjustments share it. The queue is bounded (FullMode.Wait), so a
+        /// blocking Write here is the intended backpressure path - when the
+        /// local TCP peer is slow, the message loop task pauses, which stops
+        /// replenishing the SSH receive window and throttles the client's TCP
+        /// send buffer, instead of growing the queue without limit.
+        /// Cancellation (socket closed / session teardown) unblocks the write.
         /// </summary>
         /// <param name="data">Slice over the SSH receive buffer; the send pump runs asynchronously so we copy it into the queue rather than retain the slice past the callback's return.</param>
         public void OnData(ReadOnlyMemory<byte> data)
         {
             try
             {
-                _sendChannel.Writer.TryWrite(data.ToArray());
+                // Synchronous wait on the bounded channel: the message loop
+                // task has no SynchronizationContext, so GetAwaiter().GetResult()
+                // safely blocks until the send pump frees a slot (backpressure)
+                // or the token is cancelled (teardown).
+                _sendChannel.Writer.WriteAsync(data.ToArray(), _cts.Token).AsTask().GetAwaiter().GetResult();
+            }
+            catch (ChannelClosedException)
+            {
+                OnClose();
+            }
+            catch (OperationCanceledException)
+            {
+                OnClose();
             }
             catch
             {

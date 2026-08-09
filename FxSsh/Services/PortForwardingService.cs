@@ -130,11 +130,12 @@ namespace FxSsh.Services
                 _bridges.Add((channel, socket));
 
             // The channel DataReceived callback runs on the SSH
-            // ConnectionService.MessageLoop task. It must never block there:
-            // the same task also sends the peer's window adjustments, so a
-            // blocking socket.Send would stall the peer's upload (its send
-            // window is replenished by this task). Queue the data instead
-            // and let the async send pump serialize socket.SendAsync.
+            // ConnectionService.MessageLoop task. The queue is bounded
+            // (FullMode.Wait), so a blocking Write here is the intended
+            // backpressure path: when the local TCP peer is slow, the
+            // message loop task pauses, which stops replenishing the SSH
+            // receive window and throttles the client's TCP send buffer,
+            // instead of growing the queue without limit.
             //
             // The incoming ReadOnlyMemory is a slice over the SSH receive
             // buffer, which is recycled by the next ReceiveMessage on the
@@ -143,11 +144,15 @@ namespace FxSsh.Services
             // not guaranteed live past the callback's return. This is the one
             // unavoidable copy on the inbound forwarding path, and it lives
             // exactly until the send pump consumes it, then is GC'd.
-            var sendQueue = System.Threading.Channels.Channel.CreateUnbounded<byte[]>(new UnboundedChannelOptions { SingleReader = true });
+            var sendQueue = System.Threading.Channels.Channel.CreateBounded<byte[]>(new BoundedChannelOptions(16)
+            {
+                SingleReader = true,
+                FullMode = BoundedChannelFullMode.Wait,
+            });
 
             channel.DataReceived += (_, data) =>
             {
-                try { sendQueue.Writer.TryWrite(data.ToArray()); } catch { }
+                try { sendQueue.Writer.WriteAsync(data.ToArray()).AsTask().GetAwaiter().GetResult(); } catch { }
             };
             channel.CloseReceived += (_, _) =>
             {

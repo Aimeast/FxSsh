@@ -129,6 +129,48 @@ TA==
             e.Accepted = allow;
         }
 
+        /// <summary>
+        /// Fire-and-forget channel data send that swallows teardown
+        /// exceptions. The event handlers below are async void
+        /// (EventHandler&lt;T&gt;), so any ObjectDisposedException escaping
+        /// from Channel.SendDataAsync after ForceClose would land on the
+        /// thread pool and FailFast the whole process. Teardown races are
+        /// expected once the peer disconnects or the session is closed.
+        /// </summary>
+        static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
+        {
+            try
+            {
+                await channel.SendDataAsync(data);
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (Exception)
+            {
+                // Channel/session torn down mid-send; nothing left to do.
+            }
+        }
+
+        /// <summary>
+        /// Fire-and-forget PTY input write that swallows teardown exceptions
+        /// (same rationale as <see cref="TrySendChannelDataAsync"/>).
+        /// </summary>
+        static async Task TryTerminalInputAsync(Terminal terminal, ReadOnlyMemory<byte> data)
+        {
+            try
+            {
+                await terminal.OnInputAsync(data);
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+            catch (Exception)
+            {
+                // Terminal disposed during teardown; nothing left to do.
+            }
+        }
+
         static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
         {
             Log.Info($"Received a request to forward data to {e.Host}:{e.Port}.");
@@ -141,7 +183,7 @@ TA==
             var tcp = new TcpForwardService(e.Host, e.Port, e.OriginatorIP, e.OriginatorPort);
             e.Channel.DataReceived += (ss, ee) => tcp.OnData(ee);
             e.Channel.CloseReceived += (ss, ee) => tcp.OnClose();
-            tcp.DataReceived += async (ss, ee) => await e.Channel.SendDataAsync(ee);
+            tcp.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
             tcp.CloseReceived += (ss, ee) => e.Channel.SendClose();
             tcp.Start();
         }
@@ -181,9 +223,9 @@ TA==
                 var terminal = new Terminal("cmd.exe", windowWidth, windowHeight);
 
                 e.Channel.WindowChange += (ss, ee) => terminal.Resize((int)ee.WidthColumns, (int)ee.HeightRows);
-                e.Channel.DataReceived += async (ss, ee) => await terminal.OnInputAsync(ee);
+                e.Channel.DataReceived += async (ss, ee) => await TryTerminalInputAsync(terminal, ee);
                 e.Channel.CloseReceived += (ss, ee) => terminal.OnClose();
-                terminal.DataReceived += async (ss, ee) => await e.Channel.SendDataAsync(ee);
+                terminal.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
                 terminal.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
 
                 terminal.Run();
@@ -199,7 +241,7 @@ TA==
 
                 e.Channel.DataReceived += (ss, ee) => git.OnData(ee);
                 e.Channel.CloseReceived += (ss, ee) => git.OnClose();
-                git.DataReceived += async (ss, ee) => await e.Channel.SendDataAsync(ee);
+                git.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
                 git.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
 
                 git.Start();
@@ -211,8 +253,8 @@ TA==
                     var sftp = new SftpService(OperatingSystem.IsWindows() ? @"C:\" : @"/");
                     e.Channel.DataReceived += (ss, ee) => sftp.OnData(ee);
                     e.Channel.CloseReceived += (ss, ee) => sftp.OnClose();
-                    sftp.DataReceived += async (ss, ee) => await e.Channel.SendDataAsync(ee);
-                    sftp.CloseReceived += async (ss, ee) => e.Channel.SendClose(ee);
+                    sftp.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
+                    sftp.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
                 }
             }
         }
