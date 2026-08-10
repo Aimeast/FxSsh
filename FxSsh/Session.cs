@@ -25,7 +25,11 @@ namespace FxSsh
         private const byte CarriageReturn = 0x0d;
         private const byte LineFeed = 0x0a;
         internal const int MaximumSshPacketSize = LocalChannelDataPacketSize;
-        internal const int InitialLocalWindowSize = LocalChannelDataPacketSize * 32;
+        // Advertised receive window (RFC 4254 section 5.3). 2 MiB matches the
+        // OpenSSH default and halves the WINDOW_ADJUST round-trips of the old
+        // 1 MiB window (64 vs 32 packets between refreshes), which matters for
+        // single-connection throughput and high-concurrency message-loop churn.
+        internal const int InitialLocalWindowSize = LocalChannelDataPacketSize * 64;
         internal const int LocalChannelDataPacketSize = 1024 * 32;
         // RFC 4253 section 6.1: all implementations MUST be able to process packets with
         // a total size of 35000 bytes or less; anything larger is rejected to
@@ -510,8 +514,15 @@ namespace FxSsh
                     var paddingLength = plaintext[0];
                     var dataLength = packetLength - paddingLength - 1;
                     var data = plaintext.AsMemory(1, dataLength);
-                    var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
+                    // none-compression is the identity: hand the decrypted
+                    // slice straight to LoadMessage instead of ToArray()'ing
+                    // a copy. Safe because the pooled plaintext is consumed
+                    // synchronously downstream (message loop thread) before
+                    // the next packet's Rent reuses it.
+                    if (_algorithms.ClientCompression.IsIdentity)
+                        return LoadMessage(data.Span[0], data, packetLength);
 
+                    var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
                     return LoadMessage(dataArray[0], dataArray, packetLength);
                 }
                 catch (CryptographicException)
@@ -563,6 +574,12 @@ namespace FxSsh
                 var paddingLength = cipher.Span[0];
                 var dataLength = packetLength - paddingLength - 1;
                 var data = cipher.Memory.Slice(1, dataLength);
+                // none-compression is the identity: hand the decrypted slice
+                // straight to LoadMessage instead of ToArray()'ing a copy.
+                // Safe for the same reason as the AEAD path above.
+                if (_algorithms.ClientCompression.IsIdentity)
+                    return LoadMessage(data.Span[0], data, packetLength);
+
                 var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
 
                 return LoadMessage(dataArray[0], dataArray, packetLength);
@@ -616,7 +633,10 @@ namespace FxSsh
                     throw new SshConnectionException("Invalid MAC", DisconnectReason.MacError);
                 }
 
-                dataNonEtm = _algorithms.ClientCompression.Decompress(dataNonEtm).ToArray();
+                // none-compression is the identity: dataNonEtm is already the
+                // plaintext payload, so skip the ToArray() round-trip copy.
+                if (!_algorithms.ClientCompression.IsIdentity)
+                    dataNonEtm = _algorithms.ClientCompression.Decompress(dataNonEtm).ToArray();
             }
 
             var typeNumber = dataNonEtm[0];
@@ -626,9 +646,11 @@ namespace FxSsh
         /// <summary>
         /// Convert a decrypted payload into a Message instance, then update
         /// inbound sequencing and the keepalive idle clock. Shared by the ETM
-        /// and the regular receive paths.
+        /// and the regular receive paths. Takes a ReadOnlyMemory so identity
+        /// (none) compression can hand the decrypted slice through without a
+        /// ToArray() copy.
         /// </summary>
-        private Message LoadMessage(byte typeNumber, byte[] data, int packetLength)
+        private Message LoadMessage(byte typeNumber, ReadOnlyMemory<byte> data, int packetLength)
         {
             if (Log.IsEnabled(LogLevel.Trace))
             {

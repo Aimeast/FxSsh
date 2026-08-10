@@ -383,12 +383,12 @@ namespace FxSsh.Services
             //
             // We refresh when the remaining window drops below HALF of the
             // initial window rather than below one max-packet (ServerMaxPacketSize).
-            // With InitialLocalWindowSize = 1 MiB and ServerMaxPacketSize = 32 KiB,
+            // With InitialLocalWindowSize = 2 MiB and ServerMaxPacketSize = 32 KiB,
             // the previous "<= ServerMaxPacketSize" threshold refreshed roughly
-            // every 64 inbound ~16 KiB packets; the half-window threshold refreshes
-            // roughly every 32 packets, which halves how often the SSH receive
+            // every 128 inbound ~16 KiB packets; the half-window threshold refreshes
+            // roughly every 64 packets, which halves how often the SSH receive
             // thread is synchronously interrupted to encrypt + transmit a
-            // WINDOW_ADJUST message. Because 1/2 initial (512 KiB) is still far
+            // WINDOW_ADJUST message. Because 1/2 initial (1 MiB) is still far
             // above ServerMaxPacketSize (32 KiB), the peer can always send a
             // full-size packet between refreshes - the RFC 4254 hard constraint
             // stays satisfied. BytesToAdd tops the window back up to the initial
