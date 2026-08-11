@@ -101,15 +101,6 @@ namespace FxSsh.Services
         /// <summary>Queued outbound bytes produced before OPEN_CONFIRMATION arrives.</summary>
         private readonly System.Collections.Generic.List<ReadOnlyMemory<byte>> _pendingSends = [];
 
-        // Reused outbound data message. SendMessage frames synchronously
-        // (payload is copied into the session's pooled send buffer before it
-        // returns), so the message object is never referenced after the call
-        // and can be safely rewritten per chunk. Per-channel sends are
-        // serialized (single message loop + single bridge pump per channel),
-        // so a shared instance avoids one ChannelDataMessage allocation per
-        // outbound chunk (~12.5k/s/connection at 200 MB/s of 16 KiB chunks).
-        private readonly ChannelDataMessage _dataMessage = new();
-
         public bool ClientClosed { get; private set; }
         public bool ClientMarkedEof { get; private set; }
         public bool ServerClosed { get; private set; }
@@ -141,7 +132,10 @@ namespace FxSsh.Services
                 return;
             }
 
-            var msg = _dataMessage;
+            // Fresh message per chunk: Session.SendMessage may hold the
+            // message by reference in _blockedMessages during rekey, so a
+            // shared instance would alias and corrupt every queued chunk.
+            var msg = new ChannelDataMessage();
             msg.RecipientChannel = ClientChannelId;
 
             var total = (uint)data.Length;
@@ -212,7 +206,10 @@ namespace FxSsh.Services
                 return;
             }
 
-            var msg = _dataMessage;
+            // Fresh message per chunk: Session.SendMessage may hold the
+            // message by reference in _blockedMessages during rekey, so a
+            // shared instance would alias and corrupt every queued chunk.
+            var msg = new ChannelDataMessage();
             msg.RecipientChannel = ClientChannelId;
 
             var total = (uint)data.Length;

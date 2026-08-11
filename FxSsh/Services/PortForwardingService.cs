@@ -212,7 +212,9 @@ namespace FxSsh.Services
         /// Serialize socket.SendAsync over the channel->socket queue. Runs as
         /// a single async task so the ConnectionService message loop never
         /// blocks on the local TCP peer. Each pooled buffer is disposed after
-        /// SendAsync returns the rental to the pool.
+        /// SendAsync returns the rental to the pool; a send failure (peer
+        /// reset) stops the pump but the finally drains and disposes every
+        /// still-queued rental so nothing leaks out of the pool.
         /// </summary>
         private async Task SendLoopAsync(ChannelReader<IMemoryOwner<byte>> sendQueue, Socket socket)
         {
@@ -222,15 +224,35 @@ namespace FxSsh.Services
                 {
                     using (data)
                     {
-                        if (data.Memory.Length > 0 && socket.Connected)
-                            await socket.SendAsync(data.Memory, SocketFlags.None, _cts.Token);
+                        try
+                        {
+                            if (data.Memory.Length > 0 && socket.Connected)
+                                await socket.SendAsync(data.Memory, SocketFlags.None, _cts.Token);
+                        }
+                        catch
+                        {
+                            // Single send failure (peer reset) is tolerated by
+                            // stopping the pump; the finally below drains the
+                            // remaining queue. Without this inner catch a
+                            // failure would kill the whole pump and strand the
+                            // queued rentals.
+                            break;
+                        }
                     }
                 }
             }
             catch (OperationCanceledException) { }
             catch (Exception)
             {
-                // Socket closed or canceled; nothing to do.
+                // ReadAllAsync failed (socket closed/canceled); drain below.
+            }
+            finally
+            {
+                // Dispose every pooled buffer still in the queue. ReadAllAsync
+                // stops on cancellation/error, so without this the rentals
+                // would be permanently withdrawn from the pool.
+                while (sendQueue.TryRead(out var item))
+                    item.Dispose();
             }
         }
 

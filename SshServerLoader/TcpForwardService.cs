@@ -103,15 +103,33 @@ namespace SshServerLoader
                 {
                     using (data)
                     {
-                        if (data.Memory.Length == 0)
-                            continue;
-                        await _socket.SendAsync(data.Memory, SocketFlags.None, _cts.Token);
+                        try
+                        {
+                            if (data.Memory.Length == 0)
+                                continue;
+                            await _socket.SendAsync(data.Memory, SocketFlags.None, _cts.Token);
+                        }
+                        catch
+                        {
+                            // Single send failure (peer reset) stops the pump;
+                            // the finally below drains the remaining queue so
+                            // no PooledMemoryOwner rental is stranded.
+                            break;
+                        }
                     }
                 }
             }
             catch
             {
-                // Socket closed or canceled; nothing to do.
+                // Socket closed or canceled; drain below.
+            }
+            finally
+            {
+                // Dispose every pooled buffer still in the queue. ReadAllAsync
+                // stops on cancellation/error, so without this the rentals
+                // would be permanently withdrawn from the pool.
+                while (_sendChannel.Reader.TryRead(out var item))
+                    item.Dispose();
             }
         }
 

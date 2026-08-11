@@ -153,7 +153,7 @@ namespace FxSsh.Algorithms
             HashDataDelegate hash)
         {
             var total = checked(4 + a.Length + b.Length);
-            var rental = SshBuffers.Packets.Rent(total);
+            var rental = ArrayPool<byte>.Shared.Rent(total);
             try
             {
                 var concat = rental.AsSpan(0, total);
@@ -164,7 +164,7 @@ namespace FxSsh.Algorithms
             }
             finally
             {
-                SshBuffers.Packets.Return(rental);
+                ArrayPool<byte>.Shared.Return(rental);
             }
         }
 

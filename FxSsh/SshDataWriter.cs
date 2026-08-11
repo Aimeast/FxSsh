@@ -33,7 +33,7 @@ namespace FxSsh
             // Rent at least a reasonable chunk so the common small-message
             // path never grows. ArrayPool may hand back more than requested,
             // which is fine - we track Length, not capacity.
-            _buffer = SshBuffers.Packets.Rent(Math.Max(1, expectedCapacity));
+            _buffer = ArrayPool<byte>.Shared.Rent(Math.Max(1, expectedCapacity));
             _length = 0;
         }
 
@@ -69,7 +69,7 @@ namespace FxSsh
 
             // Rental goes back to the pool now that we've surfaced an
             // independent copy; further writes would re-rent.
-            SshBuffers.Packets.Return(_buffer);
+            ArrayPool<byte>.Shared.Return(_buffer);
             _disposed = true;
             _buffer = null!;
             return result;
@@ -93,7 +93,7 @@ namespace FxSsh
             var written = _buffer.AsSpan(0, _length);
             written.CopyTo(destination);
 
-            SshBuffers.Packets.Return(_buffer);
+            ArrayPool<byte>.Shared.Return(_buffer);
             _disposed = true;
             _buffer = null!;
             return true;
@@ -113,9 +113,9 @@ namespace FxSsh
                 while (newSize < required)
                     newSize <<= 1;
 
-                var next = SshBuffers.Packets.Rent(newSize);
+                var next = ArrayPool<byte>.Shared.Rent(newSize);
                 _buffer.AsSpan(0, _length).CopyTo(next);
-                SshBuffers.Packets.Return(_buffer);
+                ArrayPool<byte>.Shared.Return(_buffer);
                 _buffer = next;
             }
 
@@ -226,7 +226,7 @@ namespace FxSsh
             _disposed = true;
             if (_buffer != null)
             {
-                SshBuffers.Packets.Return(_buffer);
+                ArrayPool<byte>.Shared.Return(_buffer);
                 _buffer = null!;
             }
         }
@@ -240,7 +240,7 @@ namespace FxSsh
         {
             if (_buffer != null)
             {
-                SshBuffers.Packets.Return(_buffer);
+                ArrayPool<byte>.Shared.Return(_buffer);
                 _buffer = null!;
             }
         }
