@@ -290,7 +290,7 @@ namespace FxSsh
                 // of the version read (matching the old SocketWriteProtocolVersion
                 // ordering).
                 var banner = Encoding.ASCII.GetBytes(ServerVersion + "\r\n");
-                var bannerBuf = ArrayPool<byte>.Shared.Rent(banner.Length);
+                var bannerBuf = SshBuffers.Packets.Rent(banner.Length);
                 banner.CopyTo(bannerBuf.AsSpan());
                 _sendChannel.Writer.TryWrite(new PooledBuffer(bannerBuf, banner.Length));
 
@@ -391,7 +391,7 @@ namespace FxSsh
             {
                 if (_buffer != null)
                 {
-                    ArrayPool<byte>.Shared.Return(_buffer);
+                    SshBuffers.Packets.Return(_buffer);
                     _buffer = null!;
                 }
             }
@@ -420,7 +420,7 @@ namespace FxSsh
             if (result.IsCanceled || (result.IsCompleted && result.Buffer.Length < length))
                 return new PooledBuffer(Array.Empty<byte>(), 0);
 
-            var buffer = ArrayPool<byte>.Shared.Rent(length);
+            var buffer = SshBuffers.Packets.Rent(length);
             result.Buffer.Slice(0, length).CopyTo(buffer);
             _receivePipe.Reader.AdvanceTo(result.Buffer.GetPosition(length));
 
@@ -500,7 +500,7 @@ namespace FxSsh
                 // packetLength bytes). The rental is returned in finally after
                 // Decompress has copied the payload out, so the receive path
                 // allocates no plaintext array per packet.
-                var plaintext = ArrayPool<byte>.Shared.Rent(packetLength);
+                var plaintext = SshBuffers.Packets.Rent(packetLength);
                 try
                 {
                     // AAD is exactly the 4-byte plaintext packet_length --
@@ -533,7 +533,7 @@ namespace FxSsh
                 }
                 finally
                 {
-                    ArrayPool<byte>.Shared.Return(plaintext);
+                    SshBuffers.Packets.Return(plaintext);
                 }
             }
 
@@ -760,7 +760,7 @@ namespace FxSsh
             // until the pump has written them (ArrayPool rentals returned by
             // PooledBuffer.Dispose). No per-packet heap allocation.
             var framedLength = 4 + (int)packetLength;
-            var scratch = ArrayPool<byte>.Shared.Rent(framedLength);
+            var scratch = SshBuffers.Packets.Rent(framedLength);
             try
             {
                 var frame = scratch.AsSpan(0, framedLength);
@@ -789,7 +789,7 @@ namespace FxSsh
                         finalLength += _algorithms.ServerHmac.DigestLength;
                 }
 
-                var sendBuf = ArrayPool<byte>.Shared.Rent(finalLength);
+                var sendBuf = SshBuffers.Packets.Rent(finalLength);
                 var wire = sendBuf.AsSpan(0, finalLength);
 
                 if (useAlg)
@@ -841,13 +841,13 @@ namespace FxSsh
 
                 if (!_sendChannel.Writer.TryWrite(new PooledBuffer(sendBuf, finalLength)))
                 {
-                    ArrayPool<byte>.Shared.Return(sendBuf);
+                    SshBuffers.Packets.Return(sendBuf);
                     throw new SshConnectionException("Could not enqueue message for sending.", DisconnectReason.ByApplication);
                 }
             }
             finally
             {
-                ArrayPool<byte>.Shared.Return(scratch);
+                SshBuffers.Packets.Return(scratch);
             }
 
             if (Log.IsEnabled(LogLevel.Trace))

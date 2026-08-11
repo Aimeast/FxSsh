@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -139,12 +140,13 @@ namespace FxSsh.Services
             //
             // The incoming ReadOnlyMemory is a slice over the SSH receive
             // buffer, which is recycled by the next ReceiveMessage on the
-            // message-loop task. The send pump runs asynchronously, so
-            // we MUST hand it an independent copy (ToArray) - the slice is
-            // not guaranteed live past the callback's return. This is the one
-            // unavoidable copy on the inbound forwarding path, and it lives
-            // exactly until the send pump consumes it, then is GC'd.
-            var sendQueue = System.Threading.Channels.Channel.CreateBounded<byte[]>(new BoundedChannelOptions(16)
+            // message-loop task, so we MUST hand the send pump an independent
+            // copy. Instead of ToArray()'ing a fresh byte[] per packet (the
+            // forwarding hot path's last heap allocation), the copy is made
+            // into an ArrayPool rental owned by PooledMemoryOwner, which the
+            // send pump disposes after SendAsync - the rental is reused
+            // across packets instead of hitting Gen0.
+            var sendQueue = System.Threading.Channels.Channel.CreateBounded<IMemoryOwner<byte>>(new BoundedChannelOptions(16)
             {
                 SingleReader = true,
                 FullMode = BoundedChannelFullMode.Wait,
@@ -152,7 +154,10 @@ namespace FxSsh.Services
 
             channel.DataReceived += (_, data) =>
             {
-                try { sendQueue.Writer.WriteAsync(data.ToArray()).AsTask().GetAwaiter().GetResult(); } catch { }
+                var owned = new PooledMemoryOwner(data.Length);
+                data.Span.CopyTo(owned.Memory.Span);
+                try { sendQueue.Writer.WriteAsync(owned).AsTask().GetAwaiter().GetResult(); }
+                catch { owned.Dispose(); }
             };
             channel.CloseReceived += (_, _) =>
             {
@@ -206,20 +211,20 @@ namespace FxSsh.Services
         /// <summary>
         /// Serialize socket.SendAsync over the channel->socket queue. Runs as
         /// a single async task so the ConnectionService message loop never
-        /// blocks on the local TCP peer.
+        /// blocks on the local TCP peer. Each pooled buffer is disposed after
+        /// SendAsync returns the rental to the pool.
         /// </summary>
-        private async Task SendLoopAsync(ChannelReader<byte[]> sendQueue, Socket socket)
+        private async Task SendLoopAsync(ChannelReader<IMemoryOwner<byte>> sendQueue, Socket socket)
         {
             try
             {
                 await foreach (var data in sendQueue.ReadAllAsync(_cts.Token))
                 {
-                    try
+                    using (data)
                     {
-                        if (data.Length > 0 && socket.Connected)
-                            await socket.SendAsync(data, SocketFlags.None, _cts.Token);
+                        if (data.Memory.Length > 0 && socket.Connected)
+                            await socket.SendAsync(data.Memory, SocketFlags.None, _cts.Token);
                     }
-                    catch { }
                 }
             }
             catch (OperationCanceledException) { }

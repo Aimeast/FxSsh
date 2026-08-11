@@ -1,8 +1,10 @@
 ﻿using System;
+using System.Buffers;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using FxSsh;
 
 namespace SshServerLoader
 {
@@ -22,6 +24,8 @@ namespace SshServerLoader
         // Bounded queue: at most 16 in-flight 64KiB chunks (~1 MiB) per
         // forward, so a slow local peer cannot balloon memory. FullMode.Wait
         // makes Writer.Write block (backpressure) instead of dropping data.
+        // Elements are ArrayPool rentals (PooledMemoryOwner) so the inbound
+        // copy never allocates a fresh byte[] per packet.
         private static readonly BoundedChannelOptions SendChannelOptions = new(16)
         {
             SingleReader = true,
@@ -31,7 +35,7 @@ namespace SshServerLoader
         private Socket _socket;
         private string _host;
         private int _port;
-        private readonly Channel<byte[]> _sendChannel = Channel.CreateBounded<byte[]>(SendChannelOptions);
+        private readonly Channel<IMemoryOwner<byte>> _sendChannel = Channel.CreateBounded<IMemoryOwner<byte>>(SendChannelOptions);
         private readonly CancellationTokenSource _cts = new();
         private bool _closed;
 
@@ -97,9 +101,12 @@ namespace SshServerLoader
             {
                 await foreach (var data in _sendChannel.Reader.ReadAllAsync(_cts.Token))
                 {
-                    if (data.Length == 0)
-                        continue;
-                    await _socket.SendAsync(data, SocketFlags.None, _cts.Token);
+                    using (data)
+                    {
+                        if (data.Memory.Length == 0)
+                            continue;
+                        await _socket.SendAsync(data.Memory, SocketFlags.None, _cts.Token);
+                    }
                 }
             }
             catch
@@ -121,24 +128,31 @@ namespace SshServerLoader
         /// <param name="data">Slice over the SSH receive buffer; the send pump runs asynchronously so we copy it into the queue rather than retain the slice past the callback's return.</param>
         public void OnData(ReadOnlyMemory<byte> data)
         {
+            // Copy into an ArrayPool rental (PooledMemoryOwner) instead of a
+            // fresh byte[] per packet; the send pump disposes it after SendAsync.
+            var owned = new PooledMemoryOwner(data.Length);
+            data.Span.CopyTo(owned.Memory.Span);
             try
             {
                 // Synchronous wait on the bounded channel: the message loop
                 // task has no SynchronizationContext, so GetAwaiter().GetResult()
                 // safely blocks until the send pump frees a slot (backpressure)
                 // or the token is cancelled (teardown).
-                _sendChannel.Writer.WriteAsync(data.ToArray(), _cts.Token).AsTask().GetAwaiter().GetResult();
+                _sendChannel.Writer.WriteAsync(owned, _cts.Token).AsTask().GetAwaiter().GetResult();
             }
             catch (ChannelClosedException)
             {
+                owned.Dispose();
                 OnClose();
             }
             catch (OperationCanceledException)
             {
+                owned.Dispose();
                 OnClose();
             }
             catch
             {
+                owned.Dispose();
                 OnClose();
             }
         }

@@ -9,10 +9,6 @@ namespace FxSsh.Services
     public abstract class Channel
     {
         protected ConnectionService _connectionService;
-        // Kept for API compatibility; the send-window wait now uses a Monitor
-        // condition variable (_windowLocker), so this handle is never
-        // Set/WaitOne'd anymore. Close() still releases the kernel object.
-        protected EventWaitHandle _sendingWindowWaitHandle = new ManualResetEvent(false);
         private readonly object _windowLocker = new object();
         private bool _forceClosed;
 
@@ -21,6 +17,12 @@ namespace FxSsh.Services
         // awaiting sender re-checks the window; the synchronous SendData
         // waiters are woken by the Monitor.PulseAll under the same lock.
         private TaskCompletionSource<bool> _windowTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // Number of senders currently parked in WaitForWindowAsync. The TCS
+        // swap in ClientAdjustWindow/ForceClose is only needed when this is
+        // non-zero; the common case (no async sender waiting) then allocates
+        // no TCS per WINDOW_ADJUST at all.
+        private int _windowWaiters;
 
         public Channel(ConnectionService connectionService,
             uint clientChannelId, uint clientInitialWindowSize, uint clientMaxPacketSize,
@@ -99,6 +101,15 @@ namespace FxSsh.Services
         /// <summary>Queued outbound bytes produced before OPEN_CONFIRMATION arrives.</summary>
         private readonly System.Collections.Generic.List<ReadOnlyMemory<byte>> _pendingSends = [];
 
+        // Reused outbound data message. SendMessage frames synchronously
+        // (payload is copied into the session's pooled send buffer before it
+        // returns), so the message object is never referenced after the call
+        // and can be safely rewritten per chunk. Per-channel sends are
+        // serialized (single message loop + single bridge pump per channel),
+        // so a shared instance avoids one ChannelDataMessage allocation per
+        // outbound chunk (~12.5k/s/connection at 200 MB/s of 16 KiB chunks).
+        private readonly ChannelDataMessage _dataMessage = new();
+
         public bool ClientClosed { get; private set; }
         public bool ClientMarkedEof { get; private set; }
         public bool ServerClosed { get; private set; }
@@ -130,7 +141,7 @@ namespace FxSsh.Services
                 return;
             }
 
-            var msg = new ChannelDataMessage();
+            var msg = _dataMessage;
             msg.RecipientChannel = ClientChannelId;
 
             var total = (uint)data.Length;
@@ -201,7 +212,7 @@ namespace FxSsh.Services
                 return;
             }
 
-            var msg = new ChannelDataMessage();
+            var msg = _dataMessage;
             msg.RecipientChannel = ClientChannelId;
 
             var total = (uint)data.Length;
@@ -255,9 +266,18 @@ namespace FxSsh.Services
                         return;
                     if (_forceClosed)
                         throw new ObjectDisposedException(nameof(Channel));
+                    _windowWaiters++;
                     signal = _windowTcs;
                 }
-                await signal.Task;
+                try
+                {
+                    await signal.Task;
+                }
+                finally
+                {
+                    lock (_windowLocker)
+                        _windowWaiters--;
+                }
                 // Spurious wake-ups are safe: loop and re-evaluate the window.
             }
         }
@@ -348,7 +368,7 @@ namespace FxSsh.Services
 
         internal void ClientAdjustWindow(uint bytesToAdd)
         {
-            TaskCompletionSource<bool> signal;
+            TaskCompletionSource<bool> signal = null;
             lock (_windowLocker)
             {
                 ClientWindowSize += bytesToAdd;
@@ -362,12 +382,18 @@ namespace FxSsh.Services
 
                 // Also wake async senders parked in WaitForWindowAsync. Swap
                 // in a fresh TCS and complete the old one so every awaiting
-                // sender re-checks the window.
-                signal = _windowTcs;
-                _windowTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                // sender re-checks the window - but only when there IS an
+                // awaiting sender. The common case (synchronous SendData, or
+                // an async sender whose window never drained) then allocates
+                // no TCS per WINDOW_ADJUST.
+                if (_windowWaiters > 0)
+                {
+                    signal = _windowTcs;
+                    _windowTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
             }
 
-            signal.TrySetResult(true);
+            signal?.TrySetResult(true);
         }
 
         private void ServerAttemptAdjustWindow(uint messageLength)
@@ -419,7 +445,7 @@ namespace FxSsh.Services
             // when the client's CHANNEL_CLOSE arrives (or vice versa), plus
             // any external listener wired onto CloseReceived can re-enter it.
             // Guard with a flag so teardown happens exactly once.
-            TaskCompletionSource<bool> signal;
+            TaskCompletionSource<bool> signal = null;
             lock (_windowLocker)
             {
                 if (_forceClosed)
@@ -433,15 +459,16 @@ namespace FxSsh.Services
 
                 // Also wake async senders parked in WaitForWindowAsync; they
                 // re-check _forceClosed and throw ObjectDisposedException.
-                signal = _windowTcs;
-                _windowTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (_windowWaiters > 0)
+                {
+                    signal = _windowTcs;
+                    _windowTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
             }
 
-            signal.TrySetResult(true);
+            signal?.TrySetResult(true);
 
             _connectionService.RemoveChannel(this);
-
-            _sendingWindowWaitHandle.Close();
         }
     }
 }
