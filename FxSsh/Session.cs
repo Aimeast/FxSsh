@@ -86,7 +86,7 @@ namespace FxSsh
         private Dictionary<string, string> _extensionsToSend = [];
         private bool _clientAdvertisedExtInfo;  // client KEXINIT had "ext-info-c"
         private ConcurrentQueue<Message> _blockedMessages = new();
-
+        private bool _ignoreNextPacket;
         private static long _nextId = 0;
         public long Id { get; }
         public ConcurrentDictionary<Type, object> ContextData { get; } = new();
@@ -311,6 +311,12 @@ namespace FxSsh
                 {
                     var message = await ReceiveMessageAsync(token);
                     if (message is null) break;
+
+                    if (_ignoreNextPacket)
+                    {
+                        _ignoreNextPacket = false;
+                        continue;
+                    }
 
                     if (message is UnknownMessage unknownMessage)
                     {
@@ -987,14 +993,18 @@ namespace FxSsh
                 ServerHostKeyAlgorithms = message.ServerHostKeyAlgorithms
             });
 
-            _exchangeContext.KeyExchange = ChooseAlgorithm([.. _keyExchangeAlgorithms.Keys], message.KeyExchangeAlgorithms);
-            _exchangeContext.PublicKey = ChooseAlgorithm(_publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray(), message.ServerHostKeyAlgorithms);
-            _exchangeContext.ClientEncryption = ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsClientToServer);
-            _exchangeContext.ServerEncryption = ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsServerToClient);
-            _exchangeContext.ClientHmac = ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsClientToServer);
-            _exchangeContext.ServerHmac = ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsServerToClient);
-            _exchangeContext.ClientCompression = ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsClientToServer);
-            _exchangeContext.ServerCompression = ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsServerToClient);
+            var isGuessed =
+                ChooseAlgorithm([.. _keyExchangeAlgorithms.Keys], message.KeyExchangeAlgorithms, out _exchangeContext.KeyExchange) &
+                ChooseAlgorithm(_publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray(), message.ServerHostKeyAlgorithms, out _exchangeContext.PublicKey) &
+                ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsClientToServer, out _exchangeContext.ClientEncryption) &
+                ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsServerToClient, out _exchangeContext.ServerEncryption) &
+                ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsClientToServer, out _exchangeContext.ClientHmac) &
+                ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsServerToClient, out _exchangeContext.ServerHmac) &
+                ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsClientToServer, out _exchangeContext.ClientCompression) &
+                ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsServerToClient, out _exchangeContext.ServerCompression);
+
+            if (message.FirstKexPacketFollows && !isGuessed)
+                _ignoreNextPacket = true;
 
             _exchangeContext.ClientKexInitPayload = message.GetPacket();
 
@@ -1324,12 +1334,14 @@ namespace FxSsh
         }
         #endregion
 
-        private string ChooseAlgorithm(string[] serverAlgorithms, string[] clientAlgorithms)
+        private static bool ChooseAlgorithm(string[] serverAlgorithms, string[] clientAlgorithms, out string chosenAlgorithm)
         {
-            foreach (var client in clientAlgorithms)
-                foreach (var server in serverAlgorithms)
-                    if (client == server)
-                        return client;
+            foreach (var clientAlgorithm in clientAlgorithms)
+                if (serverAlgorithms.Contains(clientAlgorithm))
+                {
+                    chosenAlgorithm = clientAlgorithm;
+                    return clientAlgorithm == clientAlgorithms[0];
+                }
 
             throw new SshConnectionException("Failed to negotiate algorithm.", DisconnectReason.KeyExchangeFailed);
         }
