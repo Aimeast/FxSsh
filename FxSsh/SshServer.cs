@@ -177,20 +177,17 @@ namespace FxSsh
         #region IDisposable
         public async ValueTask DisposeAsync()
         {
+            if (Volatile.Read(ref _isDisposed) == 1)
+                return;
+            await StopAsync();
             if (Interlocked.CompareExchange(ref _isDisposed, 1, 0) == 0)
-            {
-                await StopAsync();
                 GC.SuppressFinalize(this);
-            }
         }
 
         public void Dispose()
         {
-            if (Interlocked.CompareExchange(ref _isDisposed, 1, 0) == 0)
-            {
-                Stop();
-                GC.SuppressFinalize(this);
-            }
+            _ = DisposeAsync();
+            GC.SuppressFinalize(this);
         }
         #endregion
     }
