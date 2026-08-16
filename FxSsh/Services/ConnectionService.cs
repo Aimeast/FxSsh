@@ -46,6 +46,7 @@ namespace FxSsh.Services
         }
 
         public event EventHandler<CommandRequestedArgs> CommandOpened;
+        public event EventHandler<SubsystemRequestedArgs> SubsystemRequested;
         public event EventHandler<EnvironmentArgs> EnvReceived;
         public event EventHandler<PtyArgs> PtyReceived;
         public event EventHandler<TcpRequestArgs> TcpForwardRequest;
@@ -88,7 +89,18 @@ namespace FxSsh.Services
                 // messages ahead of it) so send-window accounting stays exact.
                 this.HandleMessage((dynamic)message);
             else
+            {
+                // The queued message's RawBytes is a zero-copy slice over the
+                // SSH receive buffer, which is recycled by the next
+                // ReceiveMessage. The queue is drained asynchronously, so
+                // snapshot the wire bytes now - otherwise LoadFrom<T> would
+                // re-parse garbage (e.g. a subsystem request whose type byte
+                // became the next message's type).
+                message.SnapshotRawBytes();
+                if (message is ChannelDataMessage data)
+                    data.Data = data.Data.ToArray();
                 _messageChannel.Writer.TryWrite(message);
+            }
         }
 
         private async Task MessageLoopAsync()
@@ -97,7 +109,16 @@ namespace FxSsh.Services
             {
                 await foreach (var message in _messageChannel.Reader.ReadAllAsync(_messageCts.Token))
                 {
-                    this.HandleMessage((dynamic)message);
+                    try
+                    {
+                        this.HandleMessage((dynamic)message);
+                    }
+                    catch (Exception ex)
+                    {
+                        // A single malformed/hostile message must not kill the
+                        // whole channel-processing loop silently.
+                        Log.Fail($"Connection service message handling failed: {ex}");
+                    }
                 }
             }
             catch (OperationCanceledException)
@@ -575,8 +596,20 @@ namespace FxSsh.Services
             var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
 
             Log.Info($"Subsystem requested on channel {channel.ServerChannelId}: {message.Name}.");
+
+            // Backward-compatible generic event (ShellType == "subsystem").
             var args = new CommandRequestedArgs(channel, "subsystem", message.Name, _auth);
             CommandOpened?.Invoke(this, args);
+
+            // Dedicated subsystem event (RFC 4254 section 6.5). When the host
+            // subscribes to it, its Agreed flag wins; otherwise the legacy
+            // CommandOpened decision applies. Exactly one reply is sent below.
+            var subsystemArgs = new SubsystemRequestedArgs(channel, message.Name, _auth);
+            if (SubsystemRequested != null)
+            {
+                SubsystemRequested.Invoke(this, subsystemArgs);
+                args.Agreed = subsystemArgs.Agreed;
+            }
 
             if (message.WantReply)
                 if (args.Agreed)

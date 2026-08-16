@@ -9,7 +9,7 @@
 | 维度 | 结论 |
 | --- | --- |
 | 密码算法广度 | 两库都**只支持 3 种密码**，且都**不支持** `chacha20-poly1305`、`3des-cbc`、`aes*-cbc`（除 DevTunnels 的 `aes256-cbc`）、`arcfour` 等。FxSsh 独有 `aes128-gcm`；DevTunnels 独有 `aes256-cbc`。 |
-| 密钥交换 | FxSsh 更广（6 种，含 `group18-sha512` 与 `ecdsa-nistp521`）；DevTunnels 仅 4 种，缺 `group18` 与 `nistp521`。 |
+| 密钥交换 | FxSsh 更广（7 种，含 `curve25519-sha256`、`group18-sha512` 与 `ecdsa-nistp521`）；DevTunnels 仅 4 种，缺 `curve25519`、`group18` 与 `nistp521`。 |
 | 主机密钥 | FxSsh 支持 5 种（含 `ecdsa-nistp521`）；DevTunnels 仅 4 种，缺 `nistp521`，且两者都不支持 `ssh-ed25519` / `ssh-rsa`(SHA1)。 |
 | 速度 | **FxSsh 整体更快**。同档 CTR：FxSsh 161 MB/s vs DevTunnels 56 MB/s（≈2.9×）；同档 GCM：FxSsh 311 MB/s vs DevTunnels 243 MB/s（≈1.3×）。**DevTunnels 的 CTR 模式是明显短板（~57 MB/s）。** |
 | 内存 | **FxSsh 更精简**：基线 67 MB、峰值 ~93 MB；DevTunnels 基线 83 MB、峰值 ~99 MB（多约 15 MB 基线、5–8 MB 峰值）。 |
@@ -78,11 +78,11 @@
 | `diffie-hellman-group14-sha256` | ✅ | ✅ |
 | `diffie-hellman-group16-sha512` | ✅ | ✅ |
 | `diffie-hellman-group18-sha512` | ✅ | ❌ |
-| `curve25519-sha256` / `@libssh.org` | ❌ | ❌ |
+| `curve25519-sha256` | ✅ | ❌ |
 | `diffie-hellman-group*-sha1` / `-exchange-*` | ❌ | ❌ |
 | `sntrup761x25519-sha512@openssh.com` | ❌ | ❌ |
 
-> **FxSsh 的 KEX 覆盖面更广**（6 种 vs 4 种），尤其包含更现代的 `group18-sha512` 与 `ecdsa-nistp521`。
+> **FxSsh 的 KEX 覆盖面更广**（7 种 vs 4 种），尤其包含更现代的 `curve25519-sha256`、`group18-sha512` 与 `ecdsa-nistp521`。
 
 ### 4.3 MAC（固定 `aes256-ctr`；AEAD 密码下 MAC 不生效）
 
@@ -166,7 +166,7 @@
 
 ## 7. 综合结论
 
-1. **算法覆盖面**：FxSsh（较老但功能更全）在 KEX/主机密钥上反而**更广**；DevTunnels（微软官方、偏保守默认配置）仅 `aes256` 系列、缺 `nistp521`/`group18`、无 `ssh-ed25519`。**两者密码算法都很少（各 3 种），且都缺 ChaCha20 这一现代主流算法。**
+1. **算法覆盖面**：FxSsh（较老但功能更全）在 KEX/主机密钥上反而**更广**；DevTunnels（微软官方、偏保守默认配置）仅 `aes256` 系列、缺 `curve25519-sha256`/`nistp521`/`group18`、无 `ssh-ed25519`。**两者密码算法都很少（各 3 种），且都缺 ChaCha20 这一现代主流算法。**
 2. **性能**：**FxSsh 综合性能更优**，尤其 CTR 模式下约为 DevTunnels 的 3 倍。**DevTunnels 的 CTR 实现是明显瓶颈**，若选用 DevTunnels 应优先使用 `aes256-gcm`。
 3. **资源占用**：**FxSsh 更轻量**（内存少 ~15–20%）。DevTunnels 作为通用隧道协议库，运行时开销更大。
 4. **工程可用性**：DevTunnels.Ssh 是底层协议库，**无现成 SSH 服务器/ SFTP**，需自行用 `SshServerSession` + 手动 TCP 接入 + 通道事件处理搭建服务端（本报告即如此实现）；FxSsh 提供开箱即用的 `SshServer` 与 `SftpService`。若需快速搭建 SSH 服务端，FxSsh 更省事；若已在使用 Dev Tunnels 隧道生态，则 DevTunnels.Ssh 可复用其协议栈（但需自行补齐服务端能力）。

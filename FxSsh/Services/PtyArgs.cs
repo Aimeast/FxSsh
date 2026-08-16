@@ -4,7 +4,7 @@ namespace FxSsh.Services
 {
     public class PtyArgs
     {
-        public PtyArgs(SessionChannel channel, string terminal, uint heightPx, uint heightRows, uint widthPx, uint widthChars, string modes, UserAuthArgs userAuthArgs)
+        public PtyArgs(SessionChannel channel, string terminal, uint heightPx, uint heightRows, uint widthPx, uint widthChars, byte[] modes, UserAuthArgs userAuthArgs)
         {
             ArgumentNullException.ThrowIfNull(channel);
             ArgumentNullException.ThrowIfNull(terminal);
@@ -28,7 +28,8 @@ namespace FxSsh.Services
         public uint HeightRows { get; private set; }
         public uint WidthPx { get; private set; }
         public uint WidthChars { get; private set; }
-        public string Modes { get; private set; }
+        public byte[] Modes { get; private set; }
         public UserAuthArgs AttachedUserAuthArgs { get; private set; }
     }
 }
+

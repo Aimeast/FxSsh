@@ -1,19 +1,18 @@
 ﻿using System;
 using System.IO;
-using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Win32.SafeHandles;
-using static MiniTerm.Native.ConsoleApi;
-using static MiniTerm.Native.PseudoConsoleApi;
+using static FxSsh.Services.Pty.Native.Win32Api;
 
-namespace MiniTerm
+namespace FxSsh.Services.Pty
 {
     /// <summary>
-    /// The UI of the terminal. It's just a normal console window, but we're managing the input/output.
+    /// Windows pseudo-terminal backend built on the Win32 Pseudo Console
+    /// (ConPTY, Windows 10 1809+). Implements <see cref="ITerminal"/>.
     /// In a "real" project this could be some other UI.
     /// </summary>
-    public sealed class Terminal : IDisposable
+    public sealed class ConPtyTerminal : ITerminal
     {
         private PseudoConsolePipe inputPipe;
         private PseudoConsolePipe outputPipe;
@@ -23,7 +22,7 @@ namespace MiniTerm
         private FileStream reader;
         private readonly SemaphoreSlim _inputLock = new(1, 1);
 
-        public Terminal(string command, int windowWidth, int windowHeight)
+        public ConPtyTerminal(string command, int windowWidth, int windowHeight)
         {
             // The pseudo console outputs UTF-8 bytes; ensure the host console
             // interprets them as UTF-8 rather than the legacy OEM code page.
@@ -41,7 +40,7 @@ namespace MiniTerm
         public event EventHandler<uint> CloseReceived;
 
         /// <summary>
-        /// Start the psuedoconsole and run the process as shown in 
+        /// Start the psuedoconsole and run the process as shown in
         /// https://docs.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session#creating-the-pseudoconsole
         /// </summary>
         public void Run()
@@ -166,3 +165,4 @@ namespace MiniTerm
         }
     }
 }
+

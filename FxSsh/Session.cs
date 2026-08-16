@@ -102,6 +102,10 @@ namespace FxSsh
 
         static Session()
         {
+            // curve25519-sha256 (RFC 8731) is the modern default and is
+            // registered first so clients that list it pick it up.
+            _keyExchangeAlgorithms.Add("curve25519-sha256", () => new X25519Kex());
+
             _keyExchangeAlgorithms.Add("ecdh-sha2-nistp256", () => new EcdhKex("nistp256"));
             _keyExchangeAlgorithms.Add("ecdh-sha2-nistp384", () => new EcdhKex("nistp384"));
             _keyExchangeAlgorithms.Add("ecdh-sha2-nistp521", () => new EcdhKex("nistp521"));
@@ -1021,20 +1025,18 @@ namespace FxSsh
 
         private void HandleMessage(KeyExchangeXInitMessage message)
         {
-            switch (_exchangeContext.PublicKey)
-            {
-                case "rsa-sha2-256":
-                case "rsa-sha2-512":
-                    message = Message.LoadFrom<KeyExchangeDhInitMessage>(message);
-                    break;
-                case "ecdsa-sha2-nistp256":
-                case "ecdsa-sha2-nistp384":
-                case "ecdsa-sha2-nistp521":
-                    message = Message.LoadFrom<KeyExchangeECDhInitMessage>(message);
-                    break;
-                default:
-                    throw new InvalidOperationException();
-            }
+            // RFC 8731 / RFC 5656: the message format (mpint e for DH, string Q
+            // for ECDH) is determined by the negotiated KEX algorithm, NOT the
+            // host key algorithm. curve25519-sha256 uses the ECDH message path
+            // regardless of the host key type (e.g. RSA), which the old
+            // host-key-based dispatch would have misrouted to the DH parser.
+            var kex = _exchangeContext.KeyExchange;
+            if (kex.StartsWith("curve25519-", StringComparison.Ordinal) || kex.StartsWith("ecdh-", StringComparison.Ordinal))
+                message = Message.LoadFrom<KeyExchangeECDhInitMessage>(message);
+            else if (kex.StartsWith("diffie-hellman-", StringComparison.Ordinal))
+                message = Message.LoadFrom<KeyExchangeDhInitMessage>(message);
+            else
+                throw new InvalidOperationException($"Unknown key exchange algorithm: {kex}.");
             HandleMessageCore(message);
         }
 

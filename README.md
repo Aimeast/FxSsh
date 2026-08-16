@@ -1,4 +1,4 @@
-## FxSsh
+﻿## FxSsh
 FxSsh is a lightweight [SSH](https://en.wikipedia.org/wiki/Secure_Shell) server side library.
 
 ---
@@ -22,6 +22,7 @@ FxSsh adheres to the following RFC documents
 - [RFC6668](https://tools.ietf.org/html/rfc6668)  SHA-2 Data Integrity Algorithms
 - [RFC8308](https://tools.ietf.org/html/rfc8308)  Extension Negotiation in the Secure Shell (SSH) Protocol
 - [RFC8332](https://tools.ietf.org/html/rfc8332)  Use of RSA Keys with SHA-2
+- [RFC8731](https://tools.ietf.org/html/rfc8731)  Secure Shell (SSH) Key Exchange Method Using Curve25519 and Curve448
 - [draft-ietf-secsh-filexfer-02](https://tools.ietf.org/html/draft-ietf-secsh-filexfer-02)  SSH File Transfer Protocol (sftp version 3)
 
 ### Supported Algorithms
@@ -29,7 +30,7 @@ FxSsh adheres to the following RFC documents
 | **Category**          | **Algorithms**                                                                |
 |-----------------------|-------------------------------------------------------------------------------|
 | **Public Key**        | RSA family: `rsa-sha2-256`, `rsa-sha2-512`<br>ECDsa family: `ecdsa-sha2-nistp256`, `ecdsa-sha2-nistp384`, `ecdsa-sha2-nistp521` |
-| **Key Exchange (KEX)**| DH family: `diffie-hellman-group14-sha256`, `diffie-hellman-group16-sha512`, `diffie-hellman-group18-sha512`<br>ECDH family: `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521` |
+| **Key Exchange (KEX)**| DH family: `diffie-hellman-group14-sha256`, `diffie-hellman-group16-sha512`, `diffie-hellman-group18-sha512`<br>ECDH family: `ecdh-sha2-nistp256`, `ecdh-sha2-nistp384`, `ecdh-sha2-nistp521`<br>X25519: `curve25519-sha256` |
 | **Encryption**        | `aes256-ctr`, `aes128-gcm@openssh.com`, `aes256-gcm@openssh.com` |
 | **MAC**               | `hmac-sha2-256`, `hmac-sha2-512`, `hmac-sha2-256-etm@openssh.com`, `hmac-sha2-512-etm@openssh.com` |
 | **Compression**       | `none`                                                                        |
@@ -39,8 +40,8 @@ FxSsh adheres to the following RFC documents
 | **Service**        | **Details**                                                             |
 |--------------------|-------------------------------------------------------------------------|
 | **Authentication** | `publickey`, `password`<br>`none` (optional, opt-in via `EnableNoneAuth`)          |
-| **Connection**     | `session` (e.g., exec, shell)<br>`direct-tcpip`, `forwarded-tcpip`<br>`tcpip-forward` / `cancel-tcpip-forward` (reverse port forwarding)<br>`keepalive@openssh.com` (global request) |
-| **subsystem**      | `sftp (version 3)`                                                      |
+| **Connection**     | `session` (e.g., exec, shell)<br>`direct-tcpip`, `forwarded-tcpip`<br>`tcpip-forward` / `cancel-tcpip-forward` (reverse port forwarding)<br>`keepalive@openssh.com` (global request)<br>`subsystem` (dispatch via `SubsystemRequested`) |
+| **subsystem**      | `sftp (version 3)`, provided by the core library's `FxSsh.Services.Sftp` (attach via `SftpService.Attach`, read-only via `SftpService(readOnly: true)`) |
 
 ### Tested Clients
 
@@ -160,6 +161,7 @@ static void e_ServiceRegistered(object sender, SshService e)
     {
         var service = (ConnectionService)e;
         service.CommandOpened += service_CommandOpened;
+        service.SubsystemRequested += service_SubsystemRequested;
         service.EnvReceived += service_EnvReceived;
         service.PtyReceived += service_PtyReceived;
         service.TcpForwardRequest += service_TcpForwardRequest;
@@ -175,6 +177,48 @@ static void service_TcpForwardRequestReceived(object sender, TcpForwardRequestAr
     e.Accepted = allow;
 }
 
+/// <summary>
+/// Fire-and-forget channel data send that swallows teardown
+/// exceptions. The event handlers below are async void
+/// (EventHandler&lt;T&gt;), so any ObjectDisposedException escaping
+/// from Channel.SendDataAsync after ForceClose would land on the
+/// thread pool and FailFast the whole process. Teardown races are
+/// expected once the peer disconnects or the session is closed.
+/// </summary>
+static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
+{
+    try
+    {
+        await channel.SendDataAsync(data);
+    }
+    catch (ObjectDisposedException)
+    {
+    }
+    catch (Exception)
+    {
+        // Channel/session torn down mid-send; nothing left to do.
+    }
+}
+
+/// <summary>
+/// Fire-and-forget PTY input write that swallows teardown exceptions
+/// (same rationale as <see cref="TrySendChannelDataAsync"/>).
+/// </summary>
+static async Task TryTerminalInputAsync(ITerminal terminal, ReadOnlyMemory<byte> data)
+{
+    try
+    {
+        await terminal.OnInputAsync(data);
+    }
+    catch (ObjectDisposedException)
+    {
+    }
+    catch (Exception)
+    {
+        // Terminal disposed during teardown; nothing left to do.
+    }
+}
+
 static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
 {
     Log.Info($"Received a request to forward data to {e.Host}:{e.Port}.");
@@ -187,7 +231,7 @@ static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
     var tcp = new TcpForwardService(e.Host, e.Port, e.OriginatorIP, e.OriginatorPort);
     e.Channel.DataReceived += (ss, ee) => tcp.OnData(ee);
     e.Channel.CloseReceived += (ss, ee) => tcp.OnClose();
-    tcp.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+    tcp.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
     tcp.CloseReceived += (ss, ee) => e.Channel.SendClose();
     tcp.Start();
 }
@@ -211,6 +255,20 @@ static void service_UserAuth(object sender, UserAuthArgs e)
     e.Result = true;
 }
 
+static void service_SubsystemRequested(object sender, SubsystemRequestedArgs e)
+{
+    Log.Info($"Subsystem requested: {e.Name}.");
+
+    if (e.Name != "sftp")
+        return;
+
+    e.Agreed = true;
+    // Default SFTP root is the current user's home directory.
+    // To serve read-only, use: new SftpService(readOnly: true);
+    var sftp = new SftpService();
+    sftp.Attach(e.Channel);
+}
+
 static void service_CommandOpened(object sender, CommandRequestedArgs e)
 {
     Log.Info($"Channel {e.Channel.ServerChannelId} runs {e.ShellType}: \"{e.CommandText}\", client key SHA256:{e.AttachedUserAuthArgs.Fingerprint}.");
@@ -222,14 +280,15 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
 
     if (e.ShellType == "shell")
     {
-        // requirements: Windows 10 RedStone 5, 1809
-        // also, you can call powershell.exe
-        var terminal = new Terminal("cmd.exe", windowWidth, windowHeight);
+        // Windows: Win32 Pseudo Console (ConPTY, Windows 10 1809+).
+        // Linux: devpts/ptmx (see FxSsh.Services.Pty).
+        var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "bash";
+        var terminal = TerminalFactory.Create(shell, windowWidth, windowHeight);
 
         e.Channel.WindowChange += (ss, ee) => terminal.Resize((int)ee.WidthColumns, (int)ee.HeightRows);
-        e.Channel.DataReceived += (ss, ee) => terminal.OnInput(ee);
+        e.Channel.DataReceived += async (ss, ee) => await TryTerminalInputAsync(terminal, ee);
         e.Channel.CloseReceived += (ss, ee) => terminal.OnClose();
-        terminal.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+        terminal.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
         terminal.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
 
         terminal.Run();
@@ -245,21 +304,16 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
 
         e.Channel.DataReceived += (ss, ee) => git.OnData(ee);
         e.Channel.CloseReceived += (ss, ee) => git.OnClose();
-        git.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+        git.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
         git.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
 
         git.Start();
     }
     else if (e.ShellType == "subsystem")
     {
-        if (e.CommandText == "sftp")
-        {
-            var sftp = new SftpService(OperatingSystem.IsWindows() ? @"C:\" : @"/");
-            e.Channel.DataReceived += (ss, ee) => sftp.OnData(ee);
-            e.Channel.CloseReceived += (ss, ee) => sftp.OnClose();
-            sftp.DataReceived += async (ss, ee) => e.Channel.SendData(ee);
-            sftp.CloseReceived += async (ss, ee) => e.Channel.SendClose(ee);
-        }
+        // SFTP is handled through the dedicated SubsystemRequested
+        // event (see service_SubsystemRequested); other subsystems
+        // are rejected by leaving Agreed unset.
     }
 }
 ```
@@ -279,3 +333,4 @@ library were originally derived from FxSsh.
 
 ### License
 The MIT license
+

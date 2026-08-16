@@ -4,13 +4,15 @@ using System.Threading.Tasks;
 using FxSsh;
 using FxSsh.Logging;
 using FxSsh.Services;
-using MiniTerm;
+using FxSsh.Services.Pty;
+using FxSsh.Services.Sftp;
 
 namespace SshServerLoader
 {
     class Program
     {
         static int windowWidth, windowHeight;
+        static byte[] ptyModes;
 
         static void Main(string[] args)
         {
@@ -114,6 +116,7 @@ TA==
             {
                 var service = (ConnectionService)e;
                 service.CommandOpened += service_CommandOpened;
+                service.SubsystemRequested += service_SubsystemRequested;
                 service.EnvReceived += service_EnvReceived;
                 service.PtyReceived += service_PtyReceived;
                 service.TcpForwardRequest += service_TcpForwardRequest;
@@ -156,7 +159,7 @@ TA==
         /// Fire-and-forget PTY input write that swallows teardown exceptions
         /// (same rationale as <see cref="TrySendChannelDataAsync"/>).
         /// </summary>
-        static async Task TryTerminalInputAsync(Terminal terminal, ReadOnlyMemory<byte> data)
+        static async Task TryTerminalInputAsync(ITerminal terminal, ReadOnlyMemory<byte> data)
         {
             try
             {
@@ -193,6 +196,7 @@ TA==
             Log.Info($"Request to create a PTY received for terminal type {e.Terminal}.");
             windowWidth = (int)e.WidthChars;
             windowHeight = (int)e.HeightRows;
+            ptyModes = e.Modes;
         }
 
         static void service_EnvReceived(object sender, EnvironmentArgs e)
@@ -207,6 +211,20 @@ TA==
             e.Result = true;
         }
 
+        static void service_SubsystemRequested(object sender, SubsystemRequestedArgs e)
+        {
+            Log.Info($"Subsystem requested: {e.Name}.");
+
+            if (e.Name != "sftp")
+                return;
+
+            e.Agreed = true;
+            // Default SFTP root is the current user's home directory.
+            // To serve read-only, use: new SftpService(readOnly: true);
+            var sftp = new SftpService();
+            sftp.Attach(e.Channel);
+        }
+
         static void service_CommandOpened(object sender, CommandRequestedArgs e)
         {
             Log.Info($"Channel {e.Channel.ServerChannelId} runs {e.ShellType}: \"{e.CommandText}\", client key SHA256:{e.AttachedUserAuthArgs.Fingerprint}.");
@@ -218,9 +236,10 @@ TA==
 
             if (e.ShellType == "shell")
             {
-                // requirements: Windows 10 RedStone 5, 1809
-                // also, you can call powershell.exe
-                var terminal = new Terminal("cmd.exe", windowWidth, windowHeight);
+                // Windows: Win32 Pseudo Console (ConPTY, Windows 10 1809+).
+                // Linux: devpts/ptmx via fork + exec (see FxSsh.Services.Pty).
+                var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "bash";
+                var terminal = TerminalFactory.Create(shell, windowWidth, windowHeight, ptyModes);
 
                 e.Channel.WindowChange += (ss, ee) => terminal.Resize((int)ee.WidthColumns, (int)ee.HeightRows);
                 e.Channel.DataReceived += async (ss, ee) => await TryTerminalInputAsync(terminal, ee);
@@ -248,15 +267,11 @@ TA==
             }
             else if (e.ShellType == "subsystem")
             {
-                if (e.CommandText == "sftp")
-                {
-                    var sftp = new SftpService(OperatingSystem.IsWindows() ? @"C:\" : @"/");
-                    e.Channel.DataReceived += (ss, ee) => sftp.OnData(ee);
-                    e.Channel.CloseReceived += (ss, ee) => sftp.OnClose();
-                    sftp.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-                    sftp.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
-                }
+                // SFTP is handled through the dedicated SubsystemRequested
+                // event (see service_SubsystemRequested); other subsystems
+                // are rejected by leaving Agreed unset.
             }
         }
     }
 }
+

@@ -9,7 +9,7 @@
 | Dimension | Conclusion |
 | --- | --- |
 | Cipher breadth | Both libraries support only **3 ciphers** and **neither** supports `chacha20-poly1305`, `3des-cbc`, `aes*-cbc` (except DevTunnels' `aes256-cbc`), or `arcfour`. FxSsh uniquely has `aes128-gcm`; DevTunnels uniquely has `aes256-cbc`. |
-| Key exchange | FxSsh is broader (6 vs 4; includes `group18-sha512` and `ecdsa-nistp521`); DevTunnels lacks `group18` and `nistp521`. |
+| Key exchange | FxSsh is broader (7 vs 4; includes `curve25519-sha256`, `group18-sha512` and `ecdsa-nistp521`); DevTunnels lacks `curve25519`, `group18` and `nistp521`. |
 | Host keys | FxSsh supports 5 (incl. `ecdsa-nistp521`); DevTunnels only 4, missing `nistp521`; neither supports `ssh-ed25519` nor `ssh-rsa`(SHA1). |
 | Speed | **FxSsh is generally faster**. Same-family CTR: FxSsh 161 MB/s vs DevTunnels 56 MB/s (~2.9×); same-family GCM: FxSsh 311 MB/s vs DevTunnels 243 MB/s (~1.3×). **DevTunnels' CTR mode is a clear weak spot (~57 MB/s).** |
 | Memory | **FxSsh is leaner**: baseline 67 MB, peak ~93 MB; DevTunnels baseline 83 MB, peak ~99 MB (~15 MB higher baseline, 5–8 MB higher peak). |
@@ -78,11 +78,11 @@
 | `diffie-hellman-group14-sha256` | ✅ | ✅ |
 | `diffie-hellman-group16-sha512` | ✅ | ✅ |
 | `diffie-hellman-group18-sha512` | ✅ | ❌ |
-| `curve25519-sha256` / `@libssh.org` | ❌ | ❌ |
+| `curve25519-sha256` | ✅ | ❌ |
 | `diffie-hellman-group*-sha1` / `-exchange-*` | ❌ | ❌ |
 | `sntrup761x25519-sha512@openssh.com` | ❌ | ❌ |
 
-> **FxSsh has broader KEX coverage** (6 vs 4), notably including the more modern `group18-sha512` and `ecdsa-nistp521`.
+> **FxSsh has broader KEX coverage** (7 vs 4), notably including the more modern `curve25519-sha256`, `group18-sha512` and `ecdsa-nistp521`.
 
 ### 4.3 MAC (with `aes256-ctr` pinned; MAC is inert for AEAD ciphers)
 
@@ -166,7 +166,7 @@ Converted to MB (÷1024):
 
 ## 7. Overall Conclusions
 
-1. **Algorithm coverage**: FxSsh (older but more feature-complete) actually has **broader** KEX/host-key support; DevTunnels (official Microsoft, conservative defaults) offers only `aes256`-family ciphers, lacks `nistp521`/`group18`, and has no `ssh-ed25519`. **Both have very few ciphers (3 each) and lack ChaCha20**, a mainstream modern algorithm.
+1. **Algorithm coverage**: FxSsh (older but more feature-complete) actually has **broader** KEX/host-key support; DevTunnels (official Microsoft, conservative defaults) offers only `aes256`-family ciphers, lacks `curve25519-sha256`/`nistp521`/`group18`, and has no `ssh-ed25519`. **Both have very few ciphers (3 each) and lack ChaCha20**, a mainstream modern algorithm.
 2. **Performance**: **FxSsh is generally faster**, especially in CTR mode (~3× DevTunnels). **DevTunnels' CTR implementation is the bottleneck** — prefer `aes256-gcm` when using DevTunnels.
 3. **Resource usage**: **FxSsh is lighter** (~15–20 MB less memory). DevTunnels, as a general tunnel-protocol library, carries higher runtime overhead.
 4. **Engineering usability**: DevTunnels.Ssh is a low-level protocol library with **no off-the-shelf SSH server / SFTP** — you must build the server yourself using `SshServerSession` + manual TCP accept + channel-event handling (as done in this report); FxSsh provides a ready-to-use `SshServer` and `SftpService`. For quickly standing up an SSH server, FxSsh is more convenient; if you are already in the Dev Tunnels tunnel ecosystem, DevTunnels.Ssh lets you reuse its protocol stack (but you must supply the server capability yourself).

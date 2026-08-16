@@ -8,6 +8,19 @@ namespace FxSsh.Messages
 
         protected ReadOnlyMemory<byte> RawBytes { get; set; }
 
+        /// <summary>
+        /// Materialise an independent copy of the wire bytes. RawBytes is a
+        /// zero-copy slice over the SSH receive buffer, which is recycled by
+        /// the next ReceiveMessage; anything that defers re-parsing RawBytes
+        /// (e.g. ConnectionService's async message queue) MUST snapshot first
+        /// or it will parse garbage from a later packet.
+        /// </summary>
+        internal void SnapshotRawBytes()
+        {
+            if (!RawBytes.IsEmpty)
+                RawBytes = RawBytes.ToArray();
+        }
+
         public void Load(ReadOnlyMemory<byte> bytes)
         {
             RawBytes = bytes;

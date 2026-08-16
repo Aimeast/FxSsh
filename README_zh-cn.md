@@ -1,4 +1,4 @@
-## FxSsh
+﻿## FxSsh
 
 FxSsh 是一个轻量级的 [SSH](https://en.wikipedia.org/wiki/Secure_Shell) 服务端库。
 
@@ -27,6 +27,7 @@ FxSsh 遵循以下 RFC 文档：
 - [RFC6668](https://tools.ietf.org/html/rfc6668)  SHA-2 数据完整性算法
 - [RFC8308](https://tools.ietf.org/html/rfc8308)  SSH 协议扩展协商
 - [RFC8332](https://tools.ietf.org/html/rfc8332)  RSA 密钥与 SHA-2 的使用
+- [RFC8731](https://tools.ietf.org/html/rfc8731)  使用 Curve25519 与 Curve448 的 SSH 密钥交换方法
 - [draft-ietf-secsh-filexfer-02](https://tools.ietf.org/html/draft-ietf-secsh-filexfer-02)  SSH 文件传输协议（sftp 版本 3）
 
 ### 支持的算法
@@ -34,7 +35,7 @@ FxSsh 遵循以下 RFC 文档：
 | **类别**            | **算法**                                                                                  |
 |---------------------|-------------------------------------------------------------------------------------------|
 | **公钥**            | RSA 系列：`rsa-sha2-256`、`rsa-sha2-512`<br>ECDsa 系列：`ecdsa-sha2-nistp256`、`ecdsa-sha2-nistp384`、`ecdsa-sha2-nistp521` |
-| **密钥交换（KEX）** | DH 系列：`diffie-hellman-group14-sha256`、`diffie-hellman-group16-sha512`、`diffie-hellman-group18-sha512`<br>ECDH 系列：`ecdh-sha2-nistp256`、`ecdh-sha2-nistp384`、`ecdh-sha2-nistp521` |
+| **密钥交换（KEX）** | DH 系列：`diffie-hellman-group14-sha256`、`diffie-hellman-group16-sha512`、`diffie-hellman-group18-sha512`<br>ECDH 系列：`ecdh-sha2-nistp256`、`ecdh-sha2-nistp384`、`ecdh-sha2-nistp521`<br>X25519：`curve25519-sha256` |
 | **加密**            | `aes256-ctr`、`aes128-gcm@openssh.com`、`aes256-gcm@openssh.com`                          |
 | **MAC**             | `hmac-sha2-256`、`hmac-sha2-512`、`hmac-sha2-256-etm@openssh.com`、`hmac-sha2-512-etm@openssh.com` |
 | **压缩**            | `none`                                                                                    |
@@ -44,8 +45,8 @@ FxSsh 遵循以下 RFC 文档：
 | **服务**            | **详情**                                                                                   |
 |---------------------|-------------------------------------------------------------------------------------------|
 | **认证**            | `publickey`、`password`<br>`none`（可选，通过 `EnableNoneAuth` 启用）                      |
-| **连接**            | `session`（如 exec、shell）<br>`direct-tcpip`、`forwarded-tcpip`<br>`tcpip-forward` / `cancel-tcpip-forward`（反向端口转发）<br>`keepalive@openssh.com`（全局请求） |
-| **子系统**          | `sftp（版本 3）`                                                                          |
+| **连接**            | `session`（如 exec、shell）<br>`direct-tcpip`、`forwarded-tcpip`<br>`tcpip-forward` / `cancel-tcpip-forward`（反向端口转发）<br>`keepalive@openssh.com`（全局请求）<br>`subsystem`（通过 `SubsystemRequested` 分发） |
+| **子系统**          | `sftp（版本 3）`，由核心库 `FxSsh.Services.Sftp` 提供（通过 `SftpService.Attach` 接入，可通过 `SftpService(readOnly: true)` 设为只读） |
 
 ### 已测试的客户端
 
@@ -166,6 +167,7 @@ static void e_ServiceRegistered(object sender, SshService e)
     {
         var service = (ConnectionService)e;
         service.CommandOpened += service_CommandOpened;
+        service.SubsystemRequested += service_SubsystemRequested;
         service.EnvReceived += service_EnvReceived;
         service.PtyReceived += service_PtyReceived;
         service.TcpForwardRequest += service_TcpForwardRequest;
@@ -181,6 +183,47 @@ static void service_TcpForwardRequestReceived(object sender, TcpForwardRequestAr
     e.Accepted = allow;
 }
 
+/// <summary>
+/// 发起即忘记（fire-and-forget）的通道数据发送，吞掉通道销毁期间的异常。
+/// 下方的事件处理器是 async void（EventHandler&lt;T&gt;），因此 ForceClose
+/// 后任何从 Channel.SendDataAsync 逃逸的 ObjectDisposedException 都会落到
+/// 线程池上并导致整个进程 FailFast。一旦对端断开或会话关闭，出现销毁竞态
+/// 是预期行为。
+/// </summary>
+static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
+{
+    try
+    {
+        await channel.SendDataAsync(data);
+    }
+    catch (ObjectDisposedException)
+    {
+    }
+    catch (Exception)
+    {
+        // 通道/会话在发送中途被销毁；无需再做处理。
+    }
+}
+
+/// <summary>
+/// 发起即忘记的 PTY 输入写入，吞掉销毁期间的异常
+/// （与 <see cref="TrySendChannelDataAsync"/> 的理由相同）。
+/// </summary>
+static async Task TryTerminalInputAsync(ITerminal terminal, ReadOnlyMemory<byte> data)
+{
+    try
+    {
+        await terminal.OnInputAsync(data);
+    }
+    catch (ObjectDisposedException)
+    {
+    }
+    catch (Exception)
+    {
+        // 终端在销毁期间被释放；无需再做处理。
+    }
+}
+
 static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
 {
     Log.Info($"Received a request to forward data to {e.Host}:{e.Port}.");
@@ -193,7 +236,7 @@ static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
     var tcp = new TcpForwardService(e.Host, e.Port, e.OriginatorIP, e.OriginatorPort);
     e.Channel.DataReceived += (ss, ee) => tcp.OnData(ee);
     e.Channel.CloseReceived += (ss, ee) => tcp.OnClose();
-    tcp.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+    tcp.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
     tcp.CloseReceived += (ss, ee) => e.Channel.SendClose();
     tcp.Start();
 }
@@ -217,6 +260,20 @@ static void service_UserAuth(object sender, UserAuthArgs e)
     e.Result = true;
 }
 
+static void service_SubsystemRequested(object sender, SubsystemRequestedArgs e)
+{
+    Log.Info($"Subsystem requested: {e.Name}.");
+
+    if (e.Name != "sftp")
+        return;
+
+    e.Agreed = true;
+    // 默认 SFTP 根目录为当前用户的主目录。
+    // 如需只读服务，请使用：new SftpService(readOnly: true);
+    var sftp = new SftpService();
+    sftp.Attach(e.Channel);
+}
+
 static void service_CommandOpened(object sender, CommandRequestedArgs e)
 {
     Log.Info($"Channel {e.Channel.ServerChannelId} runs {e.ShellType}: \"{e.CommandText}\", client key SHA256:{e.AttachedUserAuthArgs.Fingerprint}.");
@@ -228,14 +285,15 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
 
     if (e.ShellType == "shell")
     {
-        // 要求：Windows 10 RedStone 5, 1809
-        // 也可以调用 powershell.exe
-        var terminal = new Terminal("cmd.exe", windowWidth, windowHeight);
+        // Windows：Win32 伪控制台（ConPTY，Windows 10 1809+）。
+        // Linux：devpts/ptmx（见 FxSsh.Services.Pty）。
+        var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "bash";
+        var terminal = TerminalFactory.Create(shell, windowWidth, windowHeight);
 
         e.Channel.WindowChange += (ss, ee) => terminal.Resize((int)ee.WidthColumns, (int)ee.HeightRows);
-        e.Channel.DataReceived += (ss, ee) => terminal.OnInput(ee);
+        e.Channel.DataReceived += async (ss, ee) => await TryTerminalInputAsync(terminal, ee);
         e.Channel.CloseReceived += (ss, ee) => terminal.OnClose();
-        terminal.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+        terminal.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
         terminal.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
 
         terminal.Run();
@@ -251,21 +309,16 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
 
         e.Channel.DataReceived += (ss, ee) => git.OnData(ee);
         e.Channel.CloseReceived += (ss, ee) => git.OnClose();
-        git.DataReceived += (ss, ee) => e.Channel.SendData(ee);
+        git.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
         git.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
 
         git.Start();
     }
     else if (e.ShellType == "subsystem")
     {
-        if (e.CommandText == "sftp")
-        {
-            var sftp = new SftpService(OperatingSystem.IsWindows() ? @"C:\" : @"/");
-            e.Channel.DataReceived += (ss, ee) => sftp.OnData(ee);
-            e.Channel.CloseReceived += (ss, ee) => sftp.OnClose();
-            sftp.DataReceived += async (ss, ee) => e.Channel.SendData(ee);
-            sftp.CloseReceived += async (ss, ee) => e.Channel.SendClose(ee);
-        }
+        // SFTP 通过专门的 SubsystemRequested 事件处理
+        // （参见 service_SubsystemRequested）；其他子系统
+        // 通过不设置 Agreed 来拒绝。
     }
 }
 ```
@@ -287,3 +340,4 @@ KeyGenerator.ConvertRsaBase64KeyToPem("base64");   // 将旧的 RSA Base64 密�
 ### 许可证
 
 MIT 许可证
+
