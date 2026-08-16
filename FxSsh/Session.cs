@@ -86,7 +86,7 @@ namespace FxSsh
         private Dictionary<string, string> _extensionsToSend = [];
         private bool _clientAdvertisedExtInfo;  // client KEXINIT had "ext-info-c"
         private ConcurrentQueue<Message> _blockedMessages = new();
-        private bool _ignoreNextPacket;
+        private bool _discardNextKexPacket;
 
         private static long _nextId = 0;
         public long Id { get; }
@@ -323,9 +323,9 @@ namespace FxSsh
                     var message = await ReceiveMessageAsync(token);
                     if (message is null) break;
 
-                    if (_ignoreNextPacket)
+                    if (_discardNextKexPacket)
                     {
-                        _ignoreNextPacket = false;
+                        _discardNextKexPacket = false;
                         continue;
                     }
 
@@ -1011,7 +1011,7 @@ namespace FxSsh
                 ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsServerToClient, out _exchangeContext.ServerCompression);
 
             if (message.FirstKexPacketFollows && !isGuessed)
-                _ignoreNextPacket = true;
+                _discardNextKexPacket = true;
 
             _exchangeContext.ClientKexInitPayload = message.GetPacket();
 
