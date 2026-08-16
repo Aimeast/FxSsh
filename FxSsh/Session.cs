@@ -86,6 +86,7 @@ namespace FxSsh
         private Dictionary<string, string> _extensionsToSend = [];
         private bool _clientAdvertisedExtInfo;  // client KEXINIT had "ext-info-c"
         private ConcurrentQueue<Message> _blockedMessages = new();
+        private bool _ignoreNextPacket;
 
         private static long _nextId = 0;
         public long Id { get; }
@@ -141,6 +142,12 @@ namespace FxSsh
             _socket = socket;
             _hostKey = hostKey.ToDictionary(s => s.Key, s => s.Value);
             ServerVersion = serverBanner;
+
+            // RFC 8332: advertise which signature algorithms we accept for
+            // publickey auth. OpenSSH 8.8+ refuses to sign unless the server
+            // sends server-sig-algs (it assumes legacy ssh-rsa otherwise),
+            // and we advertise "ext-info-s" in KEXINIT, so this must be sent.
+            RegisterExtension("server-sig-algs", string.Join(",", _publicKeyAlgorithms.Keys));
         }
 
         public event EventHandler<EventArgs> Disconnected;
@@ -311,6 +318,12 @@ namespace FxSsh
                 {
                     var message = await ReceiveMessageAsync(token);
                     if (message is null) break;
+
+                    if (_ignoreNextPacket)
+                    {
+                        _ignoreNextPacket = false;
+                        continue;
+                    }
 
                     if (message is UnknownMessage unknownMessage)
                     {
@@ -514,14 +527,12 @@ namespace FxSsh
                     var paddingLength = plaintext[0];
                     var dataLength = packetLength - paddingLength - 1;
                     var data = plaintext.AsMemory(1, dataLength);
-                    // none-compression is the identity: hand the decrypted
-                    // slice straight to LoadMessage instead of ToArray()'ing
-                    // a copy. Safe because the pooled plaintext is consumed
-                    // synchronously downstream (message loop thread) before
-                    // the next packet's Rent reuses it.
-                    if (_algorithms.ClientCompression.IsIdentity)
-                        return LoadMessage(data.Span[0], data, packetLength);
-
+                    // Always copy the payload out of the pooled plaintext
+                    // buffer: LoadMessage -> ChannelDataMessage.Data is a
+                    // zero-copy slice, and ConnectionService dispatches it
+                    // onto its own async message loop, so the rental must
+                    // outlive the buffer returned in the finally below or a
+                    // later packet's decrypt can overwrite the queued data.
                     var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
                     return LoadMessage(dataArray[0], dataArray, packetLength);
                 }
@@ -574,12 +585,10 @@ namespace FxSsh
                 var paddingLength = cipher.Span[0];
                 var dataLength = packetLength - paddingLength - 1;
                 var data = cipher.Memory.Slice(1, dataLength);
-                // none-compression is the identity: hand the decrypted slice
-                // straight to LoadMessage instead of ToArray()'ing a copy.
-                // Safe for the same reason as the AEAD path above.
-                if (_algorithms.ClientCompression.IsIdentity)
-                    return LoadMessage(data.Span[0], data, packetLength);
-
+                // Always copy the payload out of the pooled cipher
+                // buffer (same reason as the AEAD path above: the
+                // message is consumed asynchronously by the service
+                // message loop after this rental has been returned).
                 var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
 
                 return LoadMessage(dataArray[0], dataArray, packetLength);
@@ -987,14 +996,18 @@ namespace FxSsh
                 ServerHostKeyAlgorithms = message.ServerHostKeyAlgorithms
             });
 
-            _exchangeContext.KeyExchange = ChooseAlgorithm([.. _keyExchangeAlgorithms.Keys], message.KeyExchangeAlgorithms);
-            _exchangeContext.PublicKey = ChooseAlgorithm(_publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray(), message.ServerHostKeyAlgorithms);
-            _exchangeContext.ClientEncryption = ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsClientToServer);
-            _exchangeContext.ServerEncryption = ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsServerToClient);
-            _exchangeContext.ClientHmac = ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsClientToServer);
-            _exchangeContext.ServerHmac = ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsServerToClient);
-            _exchangeContext.ClientCompression = ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsClientToServer);
-            _exchangeContext.ServerCompression = ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsServerToClient);
+            var isGuessed =
+                ChooseAlgorithm([.. _keyExchangeAlgorithms.Keys], message.KeyExchangeAlgorithms, out _exchangeContext.KeyExchange) &
+                ChooseAlgorithm(_publicKeyAlgorithms.Keys.Intersect(_hostKey.Keys).ToArray(), message.ServerHostKeyAlgorithms, out _exchangeContext.PublicKey) &
+                ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsClientToServer, out _exchangeContext.ClientEncryption) &
+                ChooseAlgorithm([.. _encryptionAlgorithms.Keys], message.EncryptionAlgorithmsServerToClient, out _exchangeContext.ServerEncryption) &
+                ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsClientToServer, out _exchangeContext.ClientHmac) &
+                ChooseAlgorithm([.. _hmacAlgorithms.Keys], message.MacAlgorithmsServerToClient, out _exchangeContext.ServerHmac) &
+                ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsClientToServer, out _exchangeContext.ClientCompression) &
+                ChooseAlgorithm([.. _compressionAlgorithms.Keys], message.CompressionAlgorithmsServerToClient, out _exchangeContext.ServerCompression);
+
+            if (message.FirstKexPacketFollows && !isGuessed)
+                _ignoreNextPacket = true;
 
             _exchangeContext.ClientKexInitPayload = message.GetPacket();
 
@@ -1056,6 +1069,7 @@ namespace FxSsh
             };
 
             SendMessage(reply);
+            SendMessage(new NewKeysMessage());
         }
 
         private void HandleMessage(KeyExchangeECDhInitMessage message)
@@ -1089,6 +1103,7 @@ namespace FxSsh
             };
 
             SendMessage(reply);
+            SendMessage(new NewKeysMessage());
         }
 
         private void HandleMessage(NewKeysMessage message)
@@ -1100,7 +1115,6 @@ namespace FxSsh
             // un-ACKed and Nagle blocks the subsequent SERVICE_REQUEST until the
             // delayed-ACK timer fires (~40ms on Linux).
             Log.Debug("New keys applied.");
-            SendMessageInternal(new NewKeysMessage());
 
             lock (_locker)
             {
@@ -1324,12 +1338,15 @@ namespace FxSsh
         }
         #endregion
 
-        private string ChooseAlgorithm(string[] serverAlgorithms, string[] clientAlgorithms)
+
+        private static bool ChooseAlgorithm(string[] serverAlgorithms, string[] clientAlgorithms, out string chosenAlgorithm)
         {
-            foreach (var client in clientAlgorithms)
-                foreach (var server in serverAlgorithms)
-                    if (client == server)
-                        return client;
+            foreach (var clientAlgorithm in clientAlgorithms)
+                if (serverAlgorithms.Contains(clientAlgorithm))
+                {
+                    chosenAlgorithm = clientAlgorithm;
+                    return clientAlgorithm == clientAlgorithms[0];
+                }
 
             throw new SshConnectionException("Failed to negotiate algorithm.", DisconnectReason.KeyExchangeFailed);
         }

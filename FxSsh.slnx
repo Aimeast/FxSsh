@@ -5,6 +5,7 @@
     <File Path="README.md" />
     <File Path="README_zh-cn.md" />
   </Folder>
+  <Project Path="FxSsh.Tests/FxSsh.Tests.csproj" />
   <Project Path="FxSsh/FxSsh.csproj" />
   <Project Path="SshServerLoader/SshServerLoader.csproj" />
 </Solution>
