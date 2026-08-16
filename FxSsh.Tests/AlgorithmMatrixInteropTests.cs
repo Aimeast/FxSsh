@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -57,10 +57,11 @@ public class AlgorithmMatrixInteropTests
     /// </summary>
     public sealed record AlgoCase : IXunitSerializable
     {
-        public AlgoCase(AlgoCategory category, string name, bool allHostKeys = false)
+        public AlgoCase(AlgoCategory category, string name, string? sshNetReported = null, bool allHostKeys = false)
         {
             Category = category;
             Name = name;
+            SshNetReported = sshNetReported;
             AllHostKeys = allHostKeys;
         }
 
@@ -69,6 +70,7 @@ public class AlgorithmMatrixInteropTests
 
         public AlgoCategory Category { get; private set; }
         public string Name { get; private set; }
+        public string? SshNetReported { get; private set; }
         public bool AllHostKeys { get; private set; }
 
         public override string ToString() => Name;
@@ -77,6 +79,7 @@ public class AlgorithmMatrixInteropTests
         {
             info.AddValue(nameof(Category), Category);
             info.AddValue(nameof(Name), Name);
+            info.AddValue(nameof(SshNetReported), SshNetReported);
             info.AddValue(nameof(AllHostKeys), AllHostKeys);
         }
 
@@ -84,6 +87,7 @@ public class AlgorithmMatrixInteropTests
         {
             Category = info.GetValue<AlgoCategory>(nameof(Category));
             Name = info.GetValue<string>(nameof(Name)) ?? "";
+            SshNetReported = info.GetValue<string>(nameof(SshNetReported));
             AllHostKeys = info.GetValue<bool>(nameof(AllHostKeys));
         }
     }
@@ -96,6 +100,8 @@ public class AlgorithmMatrixInteropTests
     private static readonly AlgoCase[] All =
     [
         // ---- key exchange ----
+        new(AlgoCategory.Kex, "curve25519-sha256"),
+        new(AlgoCategory.Kex, "curve25519-sha256@libssh.org", sshNetReported: "curve25519-sha256"),
         new(AlgoCategory.Kex, "ecdh-sha2-nistp256"),
         new(AlgoCategory.Kex, "ecdh-sha2-nistp384"),
         new(AlgoCategory.Kex, "ecdh-sha2-nistp521"),
@@ -275,21 +281,22 @@ public class AlgorithmMatrixInteropTests
         using var client = new SshClient(info);
         client.Connect();
 
+        var reported = algo.SshNetReported ?? algo.Name;
         switch (algo.Category)
         {
             case AlgoCategory.Kex:
-                Assert.Equal(algo.Name, info.CurrentKeyExchangeAlgorithm);
+                Assert.Equal(reported, info.CurrentKeyExchangeAlgorithm);
                 break;
             case AlgoCategory.HostKey:
-                Assert.Equal(algo.Name, info.CurrentHostKeyAlgorithm);
+                Assert.Equal(reported, info.CurrentHostKeyAlgorithm);
                 break;
             case AlgoCategory.Cipher:
-                Assert.Equal(algo.Name, info.CurrentClientEncryption);
-                Assert.Equal(algo.Name, info.CurrentServerEncryption);
+                Assert.Equal(reported, info.CurrentClientEncryption);
+                Assert.Equal(reported, info.CurrentServerEncryption);
                 break;
             case AlgoCategory.Mac:
-                Assert.Equal(algo.Name, info.CurrentClientHmacAlgorithm);
-                Assert.Equal(algo.Name, info.CurrentServerHmacAlgorithm);
+                Assert.Equal(reported, info.CurrentClientHmacAlgorithm);
+                Assert.Equal(reported, info.CurrentServerHmacAlgorithm);
                 break;
             case AlgoCategory.Compression:
                 Assert.Equal("none", info.CurrentClientCompressionAlgorithm);

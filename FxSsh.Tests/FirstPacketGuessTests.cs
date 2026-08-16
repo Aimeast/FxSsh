@@ -111,8 +111,11 @@ public class FirstPacketGuessTests
         // For a wrong guess, put an algorithm the server does not support first
         // in the kex name-list (still listing a supported one so negotiation
         // succeeds) - the server must then conclude the guess was wrong.
+        // curve25519-sha256 used to fill this role, but the server now
+        // registers it (RFC 8731) as its first preference; diffie-hellman-
+        // group14-sha1 is still absent from the registry (only group14-sha256).
         var kexAlgs = wrongGuess
-            ? ["curve25519-sha256", .. server.KeyExchangeAlgorithms]
+            ? ["diffie-hellman-group14-sha1", .. server.KeyExchangeAlgorithms]
             : server.KeyExchangeAlgorithms;
 
         var message = new KeyExchangeInitMessage

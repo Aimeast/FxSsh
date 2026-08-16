@@ -101,7 +101,15 @@ public class ServerSigAlgsTests
         // hmac-sha2-256 / none. "ext-info-c" (RFC 8308) rides in the kex
         // name-list, exactly where OpenSSH puts its markers.
         var lists = KexInitParser.ParseNameLists(client.ServerKexInitPayload);
-        var kexAlgorithms = advertiseExtInfo ? [.. lists[0], "ext-info-c"] : lists[0];
+        // Offer only the ECDH P-256 kex (plus the RFC 8308 marker when
+        // advertising EXT_INFO) so negotiation deterministically selects
+        // ecdh-sha2-nistp256 - the exchange below is ECDH-specific. Mirroring
+        // the server's full offer list would negotiate its first preference,
+        // curve25519-sha256 (RFC 8731), and the P-256 SSH_MSG_KEX_ECDH_INIT
+        // payload would be misrouted to the X25519 parser.
+        string[] kexAlgorithms = advertiseExtInfo
+            ? ["ecdh-sha2-nistp256", "ext-info-c"]
+            : ["ecdh-sha2-nistp256"];
 
         var clientKexInit = new KeyExchangeInitMessage
         {
