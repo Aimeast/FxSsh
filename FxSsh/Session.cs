@@ -531,12 +531,11 @@ namespace FxSsh
                     var paddingLength = plaintext[0];
                     var dataLength = packetLength - paddingLength - 1;
                     var data = plaintext.AsMemory(1, dataLength);
-                    // Always copy the payload out of the pooled plaintext
-                    // buffer: LoadMessage -> ChannelDataMessage.Data is a
-                    // zero-copy slice, and ConnectionService dispatches it
-                    // onto its own async message loop, so the rental must
-                    // outlive the buffer returned in the finally below or a
-                    // later packet's decrypt can overwrite the queued data.
+                    // none-compression is the identity: hand the decrypted slice
+                    // straight to LoadMessage instead of ToArray()'ing a copy.
+                    // Safe for the same reason as the AEAD path above.
+                    if (_algorithms.ClientCompression.IsIdentity)
+                        return LoadMessage(data.Span[0], data, packetLength);
                     var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
                     return LoadMessage(dataArray[0], dataArray, packetLength);
                 }
