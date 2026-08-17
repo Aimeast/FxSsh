@@ -531,9 +531,11 @@ namespace FxSsh
                     var paddingLength = plaintext[0];
                     var dataLength = packetLength - paddingLength - 1;
                     var data = plaintext.AsMemory(1, dataLength);
-                    // none-compression is the identity: hand the decrypted slice
-                    // straight to LoadMessage instead of ToArray()'ing a copy.
-                    // Safe for the same reason as the AEAD path above.
+                    // none-compression is the identity: hand the decrypted
+                    // slice straight to LoadMessage instead of ToArray()'ing
+                    // a copy. Safe because the pooled plaintext is consumed
+                    // synchronously downstream (message loop thread) before
+                    // the next packet's Rent reuses it.
                     if (_algorithms.ClientCompression.IsIdentity)
                         return LoadMessage(data.Span[0], data, packetLength);
                     var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
@@ -588,10 +590,11 @@ namespace FxSsh
                 var paddingLength = cipher.Span[0];
                 var dataLength = packetLength - paddingLength - 1;
                 var data = cipher.Memory.Slice(1, dataLength);
-                // Always copy the payload out of the pooled cipher
-                // buffer (same reason as the AEAD path above: the
-                // message is consumed asynchronously by the service
-                // message loop after this rental has been returned).
+                // none-compression is the identity: hand the decrypted slice
+                // straight to LoadMessage instead of ToArray()'ing a copy.
+                // Safe for the same reason as the AEAD path above.
+                if (_algorithms.ClientCompression.IsIdentity)
+                    return LoadMessage(data.Span[0], data, packetLength);
                 var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
 
                 return LoadMessage(dataArray[0], dataArray, packetLength);
