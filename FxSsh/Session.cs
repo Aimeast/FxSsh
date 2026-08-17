@@ -538,6 +538,7 @@ namespace FxSsh
                     // the next packet's Rent reuses it.
                     if (_algorithms.ClientCompression.IsIdentity)
                         return LoadMessage(data.Span[0], data, packetLength);
+
                     var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
                     return LoadMessage(dataArray[0], dataArray, packetLength);
                 }
@@ -595,6 +596,7 @@ namespace FxSsh
                 // Safe for the same reason as the AEAD path above.
                 if (_algorithms.ClientCompression.IsIdentity)
                     return LoadMessage(data.Span[0], data, packetLength);
+
                 var dataArray = _algorithms.ClientCompression.Decompress(data).ToArray();
 
                 return LoadMessage(dataArray[0], dataArray, packetLength);
@@ -1073,6 +1075,9 @@ namespace FxSsh
             };
 
             SendMessage(reply);
+            // RFC 4253 7.3: send our NEWKEYS (with the old keys) right after
+            // the KEX reply; the client's NEWKEYS applies them in
+            // HandleMessage(NewKeysMessage).
             SendMessage(new NewKeysMessage());
         }
 
@@ -1107,19 +1112,19 @@ namespace FxSsh
             };
 
             SendMessage(reply);
+            // RFC 4253 7.3: send our NEWKEYS (with the old keys) right after
+            // the KEX reply; the client's NEWKEYS applies them in
+            // HandleMessage(NewKeysMessage).
             SendMessage(new NewKeysMessage());
         }
 
         private void HandleMessage(NewKeysMessage message)
         {
-            // RFC 4253 7.3: send SSH_MSG_NEWKEYS before applying the new keys.
-            // We deliberately send the server's NEWKEYS here (after receiving the
-            // client's NEWKEYS) so that our server's NEWKEYS data segment piggybacks
-            // the ACK for the client's NEWKEYS. Otherwise the client's NEWKEYS stays
-            // un-ACKed and Nagle blocks the subsequent SERVICE_REQUEST until the
-            // delayed-ACK timer fires (~40ms on Linux).
-            Log.Debug("New keys applied.");
-
+            // The client's NEWKEYS: apply the algorithms computed during the
+            // exchange. The server's own NEWKEYS was already sent right after
+            // the KEX reply (see HandleMessage(KeyExchangeDhInitMessage) /
+            // KeyExchangeECDhInitMessage), so once the client's NEWKEYS
+            // arrives here both directions switch to the new keys at once.
             lock (_locker)
             {
                 _inboundFlow = 0;
@@ -1127,6 +1132,8 @@ namespace FxSsh
                 _algorithms = _exchangeContext.NewAlgorithms;
                 _exchangeContext = null;
             }
+
+            Log.Debug("New keys applied.");
 
             // RFC 8308 section 2.2: send SSH_MSG_EXT_INFO as the first message
             // under the new keys, before any blocked messages are flushed.
