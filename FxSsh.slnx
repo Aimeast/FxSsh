@@ -7,4 +7,5 @@
   </Folder>
   <Project Path="FxSsh/FxSsh.csproj" />
   <Project Path="SshServerLoader/SshServerLoader.csproj" />
+  <Project Path="FxSsh.Tests/FxSsh.Tests.csproj" />
 </Solution>

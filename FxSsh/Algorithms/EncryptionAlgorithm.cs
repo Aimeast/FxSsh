@@ -10,9 +10,13 @@ namespace FxSsh.Algorithms
         private readonly CipherModeEx _mode;
         private readonly ICryptoTransform _transform;
 
-        // GCM (AEAD) branch: replaces the streaming _transform with a single
-        // per-packet invoker. Null when _mode is CBC/CTR.
-        private readonly GcmModeCryptoTransform _gcmTransform;
+        // AEAD branch: replaces the streaming _transform with a single
+        // per-packet invoker (IAeadTransform). Null when _mode is CBC/CTR.
+        // The built-in implementation is GCM (GcmModeCryptoTransform); the
+        // plugin ctor lets consumers supply their own (e.g. the test-side
+        // chacha20-poly1305@openssh.com transform).
+        private readonly IAeadTransform _aeadTransform;
+        private readonly int _blockBytesSize;
 
         public EncryptionAlgorithm(SymmetricAlgorithm algorithm, int keySize, CipherModeEx mode, byte[] key, byte[] iv, bool isEncryption)
         {
@@ -34,7 +38,8 @@ namespace FxSsh.Algorithms
                 if (iv.Length != 12)
                     throw new ArgumentException("AES-GCM IV must be 12 bytes (fixed(4) || invocation_counter(8), RFC 5647 section 7.1).", nameof(iv));
 
-                _gcmTransform = new GcmModeCryptoTransform(key, iv);
+                _aeadTransform = new GcmModeCryptoTransform(key, iv);
+                _blockBytesSize = 16;
                 _algorithm = null;
                 _transform = null;
                 IsAead = true;
@@ -51,35 +56,58 @@ namespace FxSsh.Algorithms
 
             _algorithm = algorithm;
             _transform = CreateTransform(isEncryption);
-            _gcmTransform = null;
+            _aeadTransform = null;
+            _blockBytesSize = algorithm.BlockSize >> 3;
             IsAead = false;
         }
 
         /// <summary>
-        /// True for AES-GCM (RFC 5647). AEAD packets carry their auth tag
-        /// inline and do NOT use a separate HMAC; Session.Send/ReceiveMessage
-        /// branch on this to skip the HMAC computation and emit/parse the tag.
+        /// Plugin AEAD constructor for ciphers supplied from outside the library
+        /// (e.g. chacha20-poly1305@openssh.com, whose transform lives in
+        /// FxSsh.Tests). The transform owns the per-packet AEAD framing: it
+        /// writes the packet_length field (plaintext AAD for GCM, encrypted for
+        /// chacha20-poly1305@openssh.com), the ciphertext and the auth tag, and
+        /// keys its nonce off the packet sequence number. The key material from
+        /// key exchange is passed to the transform factory by CipherInfo.
+        /// <paramref name="blockBytesSize"/> is the SSH binary packet protocol's
+        /// padding alignment (16 for AES-GCM, 8 for chacha20-poly1305@openssh.com).
+        /// </summary>
+        public EncryptionAlgorithm(IAeadTransform aeadTransform, int blockBytesSize)
+        {
+            ArgumentNullException.ThrowIfNull(aeadTransform);
+            if (blockBytesSize <= 0)
+                throw new ArgumentOutOfRangeException(nameof(blockBytesSize), blockBytesSize, "Block size must be positive.");
+
+            _aeadTransform = aeadTransform;
+            _blockBytesSize = blockBytesSize;
+            _algorithm = null;
+            _transform = null;
+            IsAead = true;
+        }
+
+        /// <summary>
+        /// True for AEAD ciphers (AES-GCM per RFC 5647, chacha20-poly1305@openssh.com).
+        /// AEAD packets carry their auth tag inline and do NOT use a separate
+        /// HMAC; Session.Send/ReceiveMessage branch on this to skip the HMAC
+        /// computation and emit/parse the tag.
         /// </summary>
         public bool IsAead { get; }
 
-        /// <summary>Block size in bytes used for padding alignment (16 for AES-GCM).</summary>
-        public int BlockBytesSize
-        {
-            get { return _mode == CipherModeEx.GCM ? 16 : _algorithm.BlockSize >> 3; }
-        }
+        /// <summary>Block size in bytes used for padding alignment (16 for AES-GCM, 8 for chacha20-poly1305@openssh.com).</summary>
+        public int BlockBytesSize => _blockBytesSize;
 
-        /// <summary>GCM auth tag length (16). Only valid when IsAead.</summary>
+        /// <summary>AEAD auth tag length (16). Only valid when IsAead.</summary>
         public int TagBytes
         {
             get
             {
-                if (_gcmTransform == null)
-                    throw new InvalidOperationException("TagBytes is only defined for AEAD (GCM) algorithms.");
-                return _gcmTransform.TagBytes;
+                if (_aeadTransform == null)
+                    throw new InvalidOperationException("TagBytes is only defined for AEAD (GCM / chacha20-poly1305@openssh.com) algorithms.");
+                return _aeadTransform.TagBytes;
             }
         }
 
-        /// <summary>CTR/CBC streaming encrypt/decrypt (not valid for GCM).</summary>
+        /// <summary>CTR/CBC streaming encrypt/decrypt (not valid for AEAD).</summary>
         public byte[] Transform(byte[] input)
         {
             var output = new byte[input.Length];
@@ -87,7 +115,7 @@ namespace FxSsh.Algorithms
             return output;
         }
 
-        /// <summary>CTR/CBC streaming encrypt/decrypt (not valid for GCM).</summary>
+        /// <summary>CTR/CBC streaming encrypt/decrypt (not valid for AEAD).</summary>
         public void Transform(byte[] input, byte[] output)
         {
             Transform(input, input.Length, output);
@@ -95,7 +123,7 @@ namespace FxSsh.Algorithms
 
         /// <summary>
         /// CTR/CBC streaming encrypt/decrypt over exactly
-        /// <paramref name="inputLength"/> bytes (not valid for GCM).
+        /// <paramref name="inputLength"/> bytes (not valid for AEAD).
         ///
         /// <paramref name="inputLength"/> may be smaller than
         /// <paramref name="input"/>.Length - callers that hold a pooled buffer
@@ -115,14 +143,14 @@ namespace FxSsh.Algorithms
         /// CTR/CBC streaming encrypt/decrypt over exactly
         /// <paramref name="inputLength"/> bytes starting at
         /// <paramref name="inputOffset"/>, writing to <paramref name="outputOffset"/>
-        /// (not valid for GCM). Supports in-place use (input == output), which
+        /// (not valid for AEAD). Supports in-place use (input == output), which
         /// the ETM send path exploits to encrypt the packet body at [4..]
         /// without a scratch array.
         /// </summary>
         public void Transform(byte[] input, int inputOffset, int inputLength, byte[] output, int outputOffset)
         {
             if (_transform == null)
-                throw new InvalidOperationException("Transform is only valid for CBC/CTR; use EncryptAead/DecryptAead for GCM.");
+                throw new InvalidOperationException("Transform is only valid for CBC/CTR; use EncryptAead/DecryptAead for AEAD.");
             if (inputLength < 0 || inputOffset < 0 || inputLength > input.Length - inputOffset)
                 throw new ArgumentOutOfRangeException(nameof(inputLength));
             if (outputOffset < 0 || inputLength > output.Length - outputOffset)
@@ -132,41 +160,55 @@ namespace FxSsh.Algorithms
 
         /// <summary>
         /// AEAD encrypt one SSH packet straight into <paramref name="destination"/>:
-        /// <paramref name="aad"/> is the 4-byte plaintext packet_length (RFC 5647
-        /// section 7.3 - authenticated but not encrypted); <paramref name="plaintext"/>
-        /// is padding_length || payload || padding. Writes ciphertext || tag,
-        /// ready to follow the plaintext packet_length in the on-wire layout
-        /// [packet_length(4)][ciphertext][tag]. Caller must advance the
-        /// outbound packet sequence separately (Session does so after the write).
+        /// <paramref name="frame"/> is [packet_length(4)][padding_length||payload||padding].
+        /// Writes the on-wire length field (plaintext for GCM - it is the AAD
+        /// per RFC 5647 section 7.3; encrypted for chacha20-poly1305@openssh.com),
+        /// the ciphertext and the auth tag, ready to go on the wire as
+        /// [length_field(4)][ciphertext][tag]. Caller must advance the outbound
+        /// packet sequence separately (Session does so after the write).
         ///
         /// <paramref name="destination"/> must be at least
-        /// <paramref name="plaintext"/>.Length + TagBytes long. No intermediate
+        /// <paramref name="frame"/>.Length + TagBytes long. No intermediate
         /// allocation on the hot path.
         /// </summary>
-        public void EncryptAead(ReadOnlySpan<byte> aad, ReadOnlySpan<byte> plaintext, Span<byte> destination)
+        public void EncryptAead(uint sequenceNumber, ReadOnlySpan<byte> frame, Span<byte> destination)
         {
-            if (_gcmTransform == null)
-                throw new InvalidOperationException("EncryptAead is only valid for GCM.");
-            _gcmTransform.Encrypt(aad, plaintext, destination);
+            if (_aeadTransform == null)
+                throw new InvalidOperationException("EncryptAead is only valid for AEAD ciphers.");
+            _aeadTransform.Encrypt(sequenceNumber, frame, destination);
         }
 
         /// <summary>
-        /// AEAD decrypt one SSH packet straight into <paramref name="plaintextDestination"/>:
-        /// <paramref name="aad"/> is the 4-byte plaintext packet_length (RFC 5647
-        /// section 7.3 - authenticated but not encrypted);
-        /// <paramref name="ciphertextWithTag"/> is ciphertext || tag.
-        /// Throws CryptographicException on tag mismatch - Session maps that to
-        /// DisconnectReason.MacError, matching the HMAC path.
+        /// AEAD: turn the 4 on-wire packet_length bytes into the plaintext
+        /// length (identity for GCM; K2-keystream decrypt for
+        /// chacha20-poly1305@openssh.com). Session calls this before reading
+        /// the packet body so the length can be validated and bounded.
+        /// </summary>
+        public int DecryptPacketLength(uint sequenceNumber, ReadOnlySpan<byte> encryptedLength)
+        {
+            if (_aeadTransform == null)
+                throw new InvalidOperationException("DecryptPacketLength is only valid for AEAD ciphers.");
+            return _aeadTransform.DecryptPacketLength(sequenceNumber, encryptedLength);
+        }
+
+        /// <summary>
+        /// AEAD authenticate and decrypt one SSH packet straight into
+        /// <paramref name="plaintextDestination"/>: <paramref name="lengthField"/>
+        /// is the 4 on-wire length bytes (GCM AAD / chacha tag input) and
+        /// <paramref name="ciphertextWithTag"/> is ciphertext || tag. The tag
+        /// is verified before decryption; throws CryptographicException on
+        /// mismatch - Session maps that to DisconnectReason.MacError, matching
+        /// the HMAC path.
         ///
         /// <paramref name="plaintextDestination"/> must be at least
         /// <paramref name="ciphertextWithTag"/>.Length - TagBytes long.
         /// No intermediate allocation on the hot path.
         /// </summary>
-        public void DecryptAead(ReadOnlySpan<byte> aad, ReadOnlySpan<byte> ciphertextWithTag, Span<byte> plaintextDestination)
+        public void DecryptAead(uint sequenceNumber, ReadOnlySpan<byte> lengthField, ReadOnlySpan<byte> ciphertextWithTag, Span<byte> plaintextDestination)
         {
-            if (_gcmTransform == null)
-                throw new InvalidOperationException("DecryptAead is only valid for GCM.");
-            _gcmTransform.Decrypt(aad, ciphertextWithTag, plaintextDestination);
+            if (_aeadTransform == null)
+                throw new InvalidOperationException("DecryptAead is only valid for AEAD ciphers.");
+            _aeadTransform.Decrypt(sequenceNumber, lengthField, ciphertextWithTag, plaintextDestination);
         }
 
         private ICryptoTransform CreateTransform(bool isEncryption)

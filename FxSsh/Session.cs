@@ -37,13 +37,21 @@ namespace FxSsh
         // RFC 4253 section 6: minimum packet size is 16 bytes total, i.e. packet_length >= 12.
         internal const int MinimumPacketLength = 12;
 
-        // Active algorithm set for this session; resolved from the server's
-        // AlgorithmSelection in the ctor (see below).
+        // Active algorithm set for this session; copied from the server's
+        // pluggable AlgorithmSelection registry in the ctor (see below).
         private readonly Dictionary<string, Func<KexAlgorithm>> _keyExchangeAlgorithms;
         internal readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms;
         private readonly Dictionary<string, Func<CipherInfo>> _encryptionAlgorithms;
         private readonly Dictionary<string, Func<HmacInfo>> _hmacAlgorithms;
         private readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms;
+
+        // Per-category tags used to warn when a Custom/Obsolete entry is actually
+        // negotiated. Names map 1:1 with the algorithm dictionaries above.
+        private readonly Dictionary<string, HazmatAlgorithmTag> _keyExchangeTags;
+        private readonly Dictionary<string, HazmatAlgorithmTag> _publicKeyTags;
+        private readonly Dictionary<string, HazmatAlgorithmTag> _encryptionTags;
+        private readonly Dictionary<string, HazmatAlgorithmTag> _hmacTags;
+        private readonly Dictionary<string, HazmatAlgorithmTag> _compressionTags;
 
         private readonly object _locker = new();
         private Socket _socket;
@@ -111,13 +119,23 @@ namespace FxSsh
             _hostKey = hostKey.ToDictionary(s => s.Key, s => s.Value);
             ServerVersion = serverBanner;
 
-            // Null selectors resolve to every algorithm supported on this
-            // platform; subsets are picked by name from AlgorithmRegistry.
-            _keyExchangeAlgorithms = AlgorithmRegistry.ResolveKeyExchange(algorithms?.KeyExchangeAlgorithms);
-            _publicKeyAlgorithms = AlgorithmRegistry.ResolveHostKey(algorithms?.HostKeyAlgorithms);
-            _encryptionAlgorithms = AlgorithmRegistry.ResolveEncryption(algorithms?.EncryptionAlgorithms);
-            _hmacAlgorithms = AlgorithmRegistry.ResolveMac(algorithms?.MacAlgorithms);
-            _compressionAlgorithms = AlgorithmRegistry.ResolveCompression(algorithms?.CompressionAlgorithms);
+            // The server's pluggable registry (seeded from AlgorithmRegistry
+            // and mutable via SshServer.Algorithms.ConfigureHazmat) is the source
+            // of truth for every category, filtered by any selectors set on it.
+            // The per-session dictionaries are copies taken at construction so
+            // later mutations to the shared registry do not disturb an in-flight
+            // session.
+            algorithms ??= new AlgorithmSelection();
+            _keyExchangeAlgorithms = CopyFactories(algorithms.KeyExchange);
+            _publicKeyAlgorithms = CopyFactories(algorithms.PublicKey);
+            _encryptionAlgorithms = CopyFactories(algorithms.Encryption);
+            _hmacAlgorithms = CopyFactories(algorithms.Hmac);
+            _compressionAlgorithms = CopyFactories(algorithms.Compression);
+            _keyExchangeTags = CopyTags(algorithms.KeyExchange);
+            _publicKeyTags = CopyTags(algorithms.PublicKey);
+            _encryptionTags = CopyTags(algorithms.Encryption);
+            _hmacTags = CopyTags(algorithms.Hmac);
+            _compressionTags = CopyTags(algorithms.Compression);
 
             // RFC 8332: advertise which signature algorithms we accept for
             // publickey auth. OpenSSH 8.8+ refuses to sign unless the server
@@ -125,6 +143,14 @@ namespace FxSsh
             // and we advertise "ext-info-s" in KEXINIT, so this must be sent.
             RegisterExtension("server-sig-algs", string.Join(",", _publicKeyAlgorithms.Keys));
         }
+
+        private static Dictionary<string, TFactory> CopyFactories<TFactory>(
+            IReadOnlyList<(string Name, TFactory Factory, HazmatAlgorithmTag Tag)> entries)
+            => entries.ToDictionary(e => e.Name, e => e.Factory);
+
+        private static Dictionary<string, HazmatAlgorithmTag> CopyTags<TFactory>(
+            IReadOnlyList<(string Name, TFactory Factory, HazmatAlgorithmTag Tag)> entries)
+            => entries.ToDictionary(e => e.Name, e => e.Tag);
 
         public event EventHandler<EventArgs> Disconnected;
 
@@ -470,8 +496,10 @@ namespace FxSsh
                 // consumes it.
                 using var lenBuf = await ReadFromPipeAsync(4, token);
                 if (lenBuf.Length == 0) return null;
-                var lenSpan = lenBuf.Span;
-                var packetLength = lenSpan[0] << 24 | lenSpan[1] << 16 | lenSpan[2] << 8 | lenSpan[3];
+                // chacha20-poly1305@openssh.com encrypts the packet_length field,
+                // AES-GCM transmits it plaintext. DecryptPacketLength recovers the
+                // plaintext length either way before it can be validated/bounded.
+                var packetLength = _algorithms.ClientEncryption.DecryptPacketLength(_inboundPacketSequence, lenBuf.Span);
                 if (packetLength < MinimumPacketLength || packetLength > MaximumPacketLength)
                 {
                     throw new SshConnectionException(
@@ -481,7 +509,7 @@ namespace FxSsh
                 }
 
                 // packetLength bytes of ciphertext: padding_length || payload || padding,
-                // followed by the 16-byte GCM tag. Per RFC 5647 section 7.3 the 4-byte
+                // followed by the 16-byte auth tag. Per RFC 5647 section 7.3 the 4-byte
                 // plaintext packet_length (lenBuf) is GCM's Additional Authenticated
                 // Data -- authenticated but not encrypted, covered by the tag.
                 var tagLength = _algorithms.ClientEncryption.TagBytes;
@@ -495,10 +523,11 @@ namespace FxSsh
                 var plaintext = SshBuffers.Packets.Rent(packetLength);
                 try
                 {
-                    // AAD is exactly the 4-byte plaintext packet_length --
-                    // NOT the whole lenBuf rental (ArrayPool hands back at
-                    // least 16 bytes; OpenSSH authenticates exactly 4).
+                    // lengthField is the 4 on-wire length bytes: GCM's AAD, and the
+                    // chacha20-poly1305 tag input (the encrypted length is passed
+                    // verbatim - the transform decrypts/authenticates it itself).
                     _algorithms.ClientEncryption.DecryptAead(
+                        _inboundPacketSequence,
                         lenBuf.ReadOnlySpan,
                         ciphertextWithTag.Array.AsSpan(0, packetLength + tagLength),
                         plaintext);
@@ -802,15 +831,13 @@ namespace FxSsh
                     if (isAead)
                     {
                         // RFC 5647 section 3 + 7.3 AEAD layout:
-                        // [packet_length(4, plaintext)][ciphertext = encrypt(padding_length||payload||padding)][tag(16)].
-                        // The 4-byte plaintext packet_length is GCM's AAD
-                        // (authenticated but not encrypted). Encrypt straight into
-                        // the rented sendBuf - no intermediate ciphertext array.
-                        frame.Slice(0, 4).CopyTo(wire);
-                        _algorithms.ServerEncryption.EncryptAead(
-                            frame.Slice(0, 4),
-                            frame.Slice(4),
-                            wire.Slice(4));
+                        // [length_field(4)][ciphertext = encrypt(padding_length||payload||padding)][tag(16)].
+                        // The AEAD transform owns the length field and the inline
+                        // tag: GCM transmits packet_length as plaintext AAD
+                        // (authenticated but not encrypted), chacha20-poly1305@openssh.com
+                        // encrypts it. Encrypt straight into the rented sendBuf -
+                        // no intermediate ciphertext array.
+                        _algorithms.ServerEncryption.EncryptAead(_outboundPacketSequence, frame, wire);
                     }
                     else if (_algorithms.ServerHmacIsEtm)
                     {
@@ -1029,8 +1056,41 @@ namespace FxSsh
                 $"ctos={_exchangeContext.ClientEncryption}:{_exchangeContext.ClientHmac}:{_exchangeContext.ClientCompression}, " +
                 $"stoc={_exchangeContext.ServerEncryption}:{_exchangeContext.ServerHmac}:{_exchangeContext.ServerCompression}.");
 
+            WarnIfHazmatNegotiated();
+
             // RFC 8308: remember whether the client supports EXT_INFO.
             _clientAdvertisedExtInfo = message.PeerExtensions.Contains("ext-info-c");
+        }
+
+        /// <summary>
+        /// Warn (with the remote endpoint) whenever a Custom or Obsolete
+        /// algorithm entry is actually negotiated. Aliases resolve at the
+        /// severity of what they point to, so only Custom / Obsolete entries
+        /// (which cannot be laundered through an alias) produce a warning.
+        /// </summary>
+        private void WarnIfHazmatNegotiated()
+        {
+            LogWarnOnTag(_keyExchangeTags, _exchangeContext.KeyExchange, "key exchange");
+            LogWarnOnTag(_publicKeyTags, _exchangeContext.PublicKey, "host key");
+            LogWarnOnTag(_encryptionTags, _exchangeContext.ClientEncryption, "encryption");
+            LogWarnOnTag(_encryptionTags, _exchangeContext.ServerEncryption, "encryption");
+            LogWarnOnTag(_hmacTags, _exchangeContext.ClientHmac, "MAC");
+            LogWarnOnTag(_hmacTags, _exchangeContext.ServerHmac, "MAC");
+            LogWarnOnTag(_compressionTags, _exchangeContext.ClientCompression, "compression");
+            LogWarnOnTag(_compressionTags, _exchangeContext.ServerCompression, "compression");
+        }
+
+        private void LogWarnOnTag(IReadOnlyDictionary<string, HazmatAlgorithmTag> tags, string algorithm, string category)
+        {
+            if (!Log.IsEnabled(LogLevel.Warn))
+                return;
+
+            if (tags.TryGetValue(algorithm, out var tag)
+                && (tag == HazmatAlgorithmTag.Custom || tag == HazmatAlgorithmTag.Obsolete))
+            {
+                string remote = _socket.RemoteEndPoint?.ToString() ?? "?";
+                Log.Warn($"Session {remote} negotiated hazmat {category} algorithm '{algorithm}' ({tag}).");
+            }
         }
 
         private void HandleMessage(KeyExchangeXInitMessage message)
@@ -1042,7 +1102,7 @@ namespace FxSsh
             // host-key-based dispatch would have misrouted to the DH parser.
             var kex = _exchangeContext.KeyExchange;
             if (kex.StartsWith("curve25519-", StringComparison.Ordinal) || kex.StartsWith("ecdh-", StringComparison.Ordinal)
-                || kex.StartsWith("mlkem", StringComparison.Ordinal))
+                || kex.StartsWith("mlkem", StringComparison.Ordinal) || kex.StartsWith("sntrup", StringComparison.Ordinal))
                 message = Message.LoadFrom<KeyExchangeECDhInitMessage>(message);
             else if (kex.StartsWith("diffie-hellman-", StringComparison.Ordinal))
                 message = Message.LoadFrom<KeyExchangeDhInitMessage>(message);

@@ -41,6 +41,31 @@ namespace FxSsh.Algorithms
             Cipher = (key, iv, isEncryption) => new EncryptionAlgorithm(null, keySize, CipherModeEx.GCM, key, iv, isEncryption);
         }
 
+        /// <summary>
+        /// Plugin AEAD constructor for ciphers supplied from outside the library
+        /// (e.g. chacha20-poly1305@openssh.com, whose transform lives in
+        /// FxSsh.Tests). <paramref name="createTransform"/> builds a per-direction
+        /// IAeadTransform from the KEX-derived key (called once for the client
+        /// and once for the server direction with their respective keys). The IV
+        /// slot is unused -- IVSize is 0, these ciphers key their per-packet
+        /// nonce off the packet sequence number -- and <paramref name="blockSizeBits"/>
+        /// drives packet_length / padding alignment (64 bits = 8 bytes for
+        /// chacha20-poly1305@openssh.com).
+        /// </summary>
+        public CipherInfo(Func<byte[], IAeadTransform> createTransform, int keySize, int blockSizeBits)
+        {
+            ArgumentNullException.ThrowIfNull(createTransform);
+            if (keySize <= 0 || keySize % 8 != 0)
+                throw new ArgumentOutOfRangeException(nameof(keySize), keySize, "Key size must be a positive multiple of 8 bits.");
+            if (blockSizeBits <= 0 || blockSizeBits % 8 != 0)
+                throw new ArgumentOutOfRangeException(nameof(blockSizeBits), blockSizeBits, "Block size must be a positive multiple of 8 bits.");
+
+            KeySize = keySize;
+            BlockSize = blockSizeBits;
+            IVSize = 0;
+            Cipher = (key, iv, isEncryption) => new EncryptionAlgorithm(createTransform(key), blockSizeBits >> 3);
+        }
+
         public int KeySize { get; private set; }
 
         /// <summary>Block size in bits (used for padding alignment).</summary>
