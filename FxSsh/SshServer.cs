@@ -6,7 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
-using FxSsh.Algorithms;
+using FxSsh.Algorithms.Catalog;
 using FxSsh.Logging;
 
 namespace FxSsh
@@ -56,6 +56,9 @@ namespace FxSsh
             if (Interlocked.CompareExchange(ref _started, 1, 0) != 0)
                 throw new InvalidOperationException("The server is already started.");
 
+            Algorithms.BuildSelection(LogCipherSuites);
+
+            Log.Info($"SSH server listening on {StartingInfo.LocalAddress}:{StartingInfo.Port}.");
             _listenser = StartingInfo.LocalAddress == IPAddress.IPv6Any
                 ? TcpListener.Create(StartingInfo.Port) // dual stack
                 : new TcpListener(StartingInfo.LocalAddress, StartingInfo.Port);
@@ -63,39 +66,52 @@ namespace FxSsh
             _listenser.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
             _listenser.Start();
 
-            // From here on the algorithm registry is frozen for configuration:
-            // ConfigureHazmat may no longer be called.
-            Algorithms.MarkStarted();
-
-            Log.Info($"SSH server listening on {StartingInfo.LocalAddress}:{StartingInfo.Port}.");
-            LogCipherSuites();
-
             _ = AcceptConnectionsAsync(cancellationToken);
 
             return Task.CompletedTask;
         }
 
-        /// <summary>
-        /// Log the server's cipher suites once at startup. Uses the same
-        /// resolution as Session (null selector = every algorithm supported
-        /// on this platform), with host key names limited to the loaded
-        /// host key types.
-        /// </summary>
-        private void LogCipherSuites()
+        private void LogCipherSuites(AlgorithmCatalog catalog)
         {
-            if (!Log.IsEnabled(LogLevel.Info))
-                return;
+            if (Log.IsEnabled(LogLevel.Info))
+            {
+                var hostKey = catalog.HostKeyCollection.Names.Intersect(_hostKey.Keys);
+                var kex = catalog.KeyExchangeCollection.Names;
+                var cipher = catalog.EncryptionCollection.Names;
+                var hmac = catalog.HmacCollection.Names;
+                var compression = catalog.CompressionCollection.Names;
 
-            var kex = Algorithms.KeyExchange.Select(x => x.Name);
-            var hostKey = Algorithms.PublicKey.Select(x => x.Name).Intersect(_hostKey.Keys);
-            var cipher = Algorithms.Encryption.Select(x => x.Name);
-            var mac = Algorithms.Hmac.Select(x => x.Name);
-            var compression = Algorithms.Compression.Select(x => x.Name);
+                Log.Info("Server cipher suites: " +
+                    $"hostkey=[{string.Join(",", hostKey)}], kex=[{string.Join(",", kex)}], " +
+                    $"cipher=[{string.Join(",", cipher)}], hmac=[{string.Join(",", hmac)}], " +
+                    $"compression=[{string.Join(",", compression)}].");
+            }
 
-            Log.Info("Server cipher suites: " +
-                $"kex=[{string.Join(",", kex)}], hostkey=[{string.Join(",", hostKey)}], " +
-                $"cipher=[{string.Join(",", cipher)}], mac=[{string.Join(",", mac)}], " +
-                $"compression=[{string.Join(",", compression)}].");
+            if (Log.IsEnabled(LogLevel.Warn))
+            {
+                var warn = LogWarnOnTag(catalog, AlgorithmTag.Obsolete);
+                if (warn.Length > 0)
+                    Log.Warn("Enabled obsolete algorithms: " + warn);
+                warn = LogWarnOnTag(catalog, AlgorithmTag.Custom);
+                if (warn.Length > 0)
+                    Log.Warn("Imported custom algorithms: " + warn);
+            }
+        }
+
+        private string LogWarnOnTag(AlgorithmCatalog catalog, AlgorithmTag tag)
+        {
+            var result = "";
+            var str = string.Join(",", catalog.HostKeyCollection.Where(x => x.Tag == tag).Select(x => x.Name));
+            if (str.Length > 0) result += $"hostkey=[{str}].";
+            str = string.Join(",", catalog.KeyExchangeCollection.Where(x => x.Tag == tag).Select(x => x.Name));
+            if (str.Length > 0) result += $"kex=[{str}].";
+            str = string.Join(",", catalog.EncryptionCollection.Where(x => x.Tag == tag).Select(x => x.Name));
+            if (str.Length > 0) result += $"cipher=[{str}].";
+            str = string.Join(",", catalog.HmacCollection.Where(x => x.Tag == tag).Select(x => x.Name));
+            if (str.Length > 0) result += $"hmac=[{str}].";
+            str = string.Join(",", catalog.CompressionCollection.Where(x => x.Tag == tag).Select(x => x.Name));
+            if (str.Length > 0) result += $"compression=[{str}].";
+            return result.TrimEnd('.');
         }
 
         public async Task StopAsync()
