@@ -97,11 +97,12 @@ TA==
                 //    those clients fail over to the remaining ones.
                 catalog.HostKeyCollection.Remove("ecdsa-sha2-nistp521");
 
-                // 3. Old algorithm, enabled on demand (appended at the end of
-                //    the category). The core ships aes256-cbc with a real
-                //    factory, seeded as Disable so it stays out of
-                //    negotiation; Enable flips it to Obsolete, which makes it
-                //    fully negotiable (the startup log warns about it).
+                // 3. Old algorithm, enabled on demand. The core ships the
+                //    legacy ciphers (3des-cbc, aes192/128-cbc, aes192/128-ctr)
+                //    with real factories, seeded as Disable at the tail of the
+                //    category so they stay out of negotiation; Enable flips it
+                //    to Obsolete at that (least-preferred) position and the
+                //    startup log warns about it.
                 catalog.EncryptionCollection.Enable("aes256-cbc");
 
                 // 4. Contributed algorithm (not in core; user-supplied): add

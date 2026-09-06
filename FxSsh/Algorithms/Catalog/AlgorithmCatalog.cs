@@ -29,10 +29,18 @@ namespace FxSsh.Algorithms.Catalog
             ("diffie-hellman-group14-sha256", AlgorithmTag.BuiltIn, true, _ => new DiffieHellmanKex(256, 2048)),
         ];
         public AlgorithmCollectionBuilder<CipherInfo> EncryptionCollection { get; } = [
-            ("aes256-cbc", AlgorithmTag.Disable, TryCreate(Aes.Create), _ => new CipherInfo(Aes.Create(), 256, CipherModeEx.CBC)),
             ("aes256-ctr", AlgorithmTag.BuiltIn, TryCreate(Aes.Create), _ => new CipherInfo(Aes.Create(), 256, CipherModeEx.CTR)),
             ("aes256-gcm@openssh.com", AlgorithmTag.BuiltIn, AesGcm.IsSupported, _ => new CipherInfo(256)),
             ("aes128-gcm@openssh.com", AlgorithmTag.BuiltIn, AesGcm.IsSupported, _ => new CipherInfo(128)),
+            // Legacy fallbacks for old peers, seeded as Disable so they stay
+            // out of negotiation; Enable() re-enables an entry at this tail
+            // position, below every modern cipher.
+            ("aes192-ctr", AlgorithmTag.Disable, TryCreate(Aes.Create), _ => new CipherInfo(Aes.Create(), 192, CipherModeEx.CTR)),
+            ("aes128-ctr", AlgorithmTag.Disable, TryCreate(Aes.Create), _ => new CipherInfo(Aes.Create(), 128, CipherModeEx.CTR)),
+            ("aes256-cbc", AlgorithmTag.Disable, TryCreate(Aes.Create), _ => new CipherInfo(Aes.Create(), 256, CipherModeEx.CBC)),
+            ("aes192-cbc", AlgorithmTag.Disable, TryCreate(Aes.Create), _ => new CipherInfo(Aes.Create(), 192, CipherModeEx.CBC)),
+            ("aes128-cbc", AlgorithmTag.Disable, TryCreate(Aes.Create), _ => new CipherInfo(Aes.Create(), 128, CipherModeEx.CBC)),
+            ("3des-cbc", AlgorithmTag.Disable, TryCreate(TripleDES.Create), _ => new CipherInfo(TripleDES.Create(), 192, CipherModeEx.CBC)),
         ];
         // Encrypt-then-MAC variants first: with ordered negotiation they are
         // the preferred choice whenever the peer lists them at all.
@@ -41,6 +49,7 @@ namespace FxSsh.Algorithms.Catalog
             ("hmac-sha2-512-etm@openssh.com", AlgorithmTag.BuiltIn, true, _ => new HmacInfo(new HMACSHA512(), 512, true)),
             ("hmac-sha2-256", AlgorithmTag.BuiltIn, true, _ => new HmacInfo(new HMACSHA256(), 256)),
             ("hmac-sha2-512", AlgorithmTag.BuiltIn, true, _ => new HmacInfo(new HMACSHA512(), 512)),
+            ("hmac-sha1", AlgorithmTag.Disable, true, _ => new HmacInfo(new HMACSHA1(), 160)),
         ];
         public AlgorithmCollectionBuilder<CompressionAlgorithm> CompressionCollection { get; } = [
             ("none", AlgorithmTag.BuiltIn, true, _ => new NoCompression()),
