@@ -82,8 +82,9 @@ TA==
             // --- Plug in algorithms via AlgorithmSelection.ConfigureHazmat
             // (issue #62). ConfigureHazmat is the only way to mutate the
             // per-server algorithm set, and must run before Start() (calling it
-            // afterwards throws InvalidOperationException). Each call logs a
-            // diff; negotiating a Custom/Obsolete entry logs a warning.
+            // afterwards throws InvalidOperationException). The resulting
+            // suites are logged at startup; negotiating a Custom/Obsolete
+            // entry logs a warning.
 
             server.Algorithms.ConfigureHazmat(catalog =>
             {
@@ -97,8 +98,10 @@ TA==
                 catalog.HostKeyCollection.Remove("ecdsa-sha2-nistp521");
 
                 // 3. Old algorithm, enabled on demand (appended at the end of
-                //    the category). The core ships aes256-cbc as a throwing
-                //    stub; register a real factory via Add to make it usable.
+                //    the category). The core ships aes256-cbc with a real
+                //    factory, seeded as Disable so it stays out of
+                //    negotiation; Enable flips it to Obsolete, which makes it
+                //    fully negotiable (the startup log warns about it).
                 catalog.EncryptionCollection.Enable("aes256-cbc");
 
                 // 4. Contributed algorithm (not in core; user-supplied): add

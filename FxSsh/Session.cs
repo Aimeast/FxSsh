@@ -112,12 +112,12 @@ namespace FxSsh
             _hostKey = hostKey.ToDictionary(s => s.Key, s => s.Value);
             ServerVersion = serverBanner;
 
-            // The server's pluggable registry (seeded from AlgorithmRegistry
-            // and mutable via SshServer.Algorithms.ConfigureHazmat) is the source
-            // of truth for every category, filtered by any selectors set on it.
-            // The per-session dictionaries are copies taken at construction so
-            // later mutations to the shared registry do not disturb an in-flight
-            // session.
+            // The server's algorithm catalog (mutable only via
+            // SshServer.Algorithms.ConfigureHazmat before the server starts)
+            // is the source of truth for every category. The per-session
+            // dictionaries are snapshots taken at construction: once the
+            // server has started, no mutation path exists (ConfigureHazmat
+            // throws), so in-flight sessions are isolated by design.
             algorithms ??= new AlgorithmSelection();
             _publicKeyAlgorithms = algorithms.HostKeySelection;
             _keyExchangeAlgorithms = algorithms.KeyExchangeSelection;

@@ -35,12 +35,13 @@ namespace FxSsh
         public StartingInfo StartingInfo { get; private set; }
 
         /// <summary>
-        /// Per-server pluggable algorithm registry, seeded from the
-        /// <see cref="AlgorithmRegistry"/> defaults supported on this platform.
-        /// Mutate (Add/Remove) the exposed per-category collections to plug in
-        /// extra algorithms (e.g. curve25519-sha256 or legacy algos) per server,
-        /// without forking the library. Mutations are reflected in the KEXINIT
-        /// name-lists and in negotiation.
+        /// Per-server pluggable algorithm registry, seeded with the
+        /// <see cref="AlgorithmCatalog"/> defaults supported on this platform.
+        /// Mutate the exposed per-category collections through
+        /// <see cref="AlgorithmSelection.ConfigureHazmat"/> before Start() to
+        /// plug in extra algorithms (e.g. legacy ciphers or alternative
+        /// names) per server, without forking the library. Mutations are
+        /// reflected in the KEXINIT name-lists and in negotiation.
         /// </summary>
         public AlgorithmSelection Algorithms { get; } = new();
 
