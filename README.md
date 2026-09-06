@@ -123,6 +123,37 @@ TA==
     server.AddHostKey("ecdsa-sha2-nistp384", ecdsap384Pem);
     server.AddHostKey("ecdsa-sha2-nistp521", ecdsap521Pem);
 
+    // --- Plug in algorithms via AlgorithmSelection.ConfigureHazmat
+    // (issue #62). ConfigureHazmat is the only way to mutate the
+    // per-server algorithm set, and must run before Start() (calling it
+    // afterwards throws InvalidOperationException). The resulting
+    // suites are logged at startup; negotiating a Custom/Obsolete
+    // entry logs a warning.
+    server.Algorithms.ConfigureHazmat(catalog =>
+    {
+        // 1. Old name: an alias reuses the built-in factory - no new
+        //    cryptographic code. curve25519-sha256@libssh.org is the
+        //    legacy OpenSSH name for the built-in curve25519-sha256.
+        catalog.KeyExchangeCollection.AddAlias("curve25519-sha256@libssh.org", "curve25519-sha256");
+
+        // 2. Client implementation is buggy - remove the algorithm so
+        //    those clients fail over to the remaining ones.
+        catalog.HostKeyCollection.Remove("ecdsa-sha2-nistp521");
+
+        // 3. Old algorithm, enabled on demand. The core ships the
+        //    legacy ciphers (3des-cbc, aes192/128-cbc, aes192/128-ctr)
+        //    with real factories, seeded as Disable at the tail of the
+        //    category so they stay out of negotiation; Enable flips it
+        //    to Obsolete at that (least-preferred) position and the
+        //    startup log warns about it.
+        catalog.EncryptionCollection.Enable("aes256-cbc");
+
+        // 4. Contributed algorithm (not in core; user-supplied): add
+        //    aes128-ctr built from the library's public AES/CTR
+        //    primitives, negotiated by legacy OpenSSH clients.
+        catalog.EncryptionCollection.Add("aes128-ctr", _ => new CipherInfo(Aes.Create(), 128, CipherModeEx.CTR));
+    });
+
     server.ConnectionAccepted += server_ConnectionAccepted;
 
     server.Start();
