@@ -129,34 +129,31 @@ TA==
     server.AddHostKey("ecdsa-sha2-nistp384", ecdsap384Pem);
     server.AddHostKey("ecdsa-sha2-nistp521", ecdsap521Pem);
 
-    // --- Plug in algorithms via AlgorithmSelection.ConfigureHazmat
-    // (issue #62). ConfigureHazmat is the only way to mutate the
-    // per-server algorithm set, and must run before Start() (calling it
-    // afterwards throws InvalidOperationException). The resulting
-    // suites are logged at startup; negotiating a Custom/Obsolete
-    // entry logs a warning.
+    // --- 通过 AlgorithmSelection.ConfigureHazmat 插拔算法（issue #62）。
+    // ConfigureHazmat 是修改每服务器算法集的唯一入口，且必须在 Start()
+    // 之前调用（之后调用抛 InvalidOperationException）。最终生效的
+    // 算法套件会在启动时打印日志；协商到 Custom/Obsolete 条目时输出警告。
     server.Algorithms.ConfigureHazmat(catalog =>
     {
-        // 1. Old name: an alias reuses the built-in factory - no new
-        //    cryptographic code. curve25519-sha256@libssh.org is the
-        //    legacy OpenSSH name for the built-in curve25519-sha256.
+        // 1. 旧名称：别名直接复用内置工厂，无需编写新的密码学代码。
+        //    curve25519-sha256@libssh.org 是内置 curve25519-sha256 的
+        //    OpenSSH 旧名称。
         catalog.KeyExchangeCollection.AddAlias("curve25519-sha256@libssh.org", "curve25519-sha256");
 
-        // 2. Client implementation is buggy - remove the algorithm so
-        //    those clients fail over to the remaining ones.
+        // 2. 客户端实现有缺陷——移除该算法，让这类客户端回退到
+        //    其余算法。
         catalog.HostKeyCollection.Remove("ecdsa-sha2-nistp521");
 
-        // 3. Old algorithm, enabled on demand. The core ships the
-        //    legacy ciphers (3des-cbc, aes192/128-cbc, aes192/128-ctr)
-        //    with real factories, seeded as Disable at the tail of the
-        //    category so they stay out of negotiation; Enable flips it
-        //    to Obsolete at that (least-preferred) position and the
-        //    startup log warns about it.
+        // 3. 旧算法按需启用。核心库自带旧式密码套件（3des-cbc、
+        //    aes192/128-cbc、aes192/128-ctr）的真实工厂，默认以
+        //    Disable 播种在类别尾部、不参与协商；Enable 将其翻为
+        //    Obsolete 并保持在该（最低偏好）位置，启动日志会给出警告。
         catalog.EncryptionCollection.Enable("aes256-cbc");
 
-        // 4. Contributed algorithm (not in core; user-supplied): add
-        //    aes128-ctr built from the library's public AES/CTR
-        //    primitives, negotiated by legacy OpenSSH clients.
+        // 4. 原地替换条目。Add() 会替换同名条目的工厂（保留其位置）
+        //    并标记为 Custom，同时也会重新启用以 Disable 播种的条目。
+        //    这会把旧式回退 aes128-ctr 重新打开，供老版 OpenSSH 客户端
+        //    在其配置位置协商使用；启动日志会给出警告。
         catalog.EncryptionCollection.Add("aes128-ctr", _ => new CipherInfo(Aes.Create(), 128, CipherModeEx.CTR));
     });
 

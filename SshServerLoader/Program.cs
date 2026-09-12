@@ -105,9 +105,12 @@ TA==
                 //    startup log warns about it.
                 catalog.EncryptionCollection.Enable("aes256-cbc");
 
-                // 4. Contributed algorithm (not in core; user-supplied): add
-                //    aes128-ctr built from the library's public AES/CTR
-                //    primitives, negotiated by legacy OpenSSH clients.
+                // 4. Replace an entry in place. Add() swaps the factory of
+                //    the same-named entry (keeping its position) and tags it
+                //    Custom, which also re-enables a Disable-seeded one.
+                //    This turns the legacy aes128-ctr fallback back on for
+                //    old OpenSSH clients at its configured position; the
+                //    startup log warns about it.
                 catalog.EncryptionCollection.Add("aes128-ctr", _ => new CipherInfo(Aes.Create(), 128, CipherModeEx.CTR));
             });
 
