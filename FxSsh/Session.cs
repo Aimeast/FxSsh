@@ -38,13 +38,13 @@ namespace FxSsh
         // RFC 4253 section 6: minimum packet size is 16 bytes total, i.e. packet_length >= 12.
         internal const int MinimumPacketLength = 12;
 
-        // Active algorithm set for this session; copied from the server's
-        // pluggable AlgorithmSelection registry in the ctor (see below).
-        private readonly IReadOnlyDictionary<string, Func<string, KexAlgorithm>> _keyExchangeAlgorithms;
-        internal readonly IReadOnlyDictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms;
-        private readonly IReadOnlyDictionary<string, Func<string, CipherInfo>> _encryptionAlgorithms;
-        private readonly IReadOnlyDictionary<string, Func<string, HmacInfo>> _hmacAlgorithms;
-        private readonly IReadOnlyDictionary<string, Func<string, CompressionAlgorithm>> _compressionAlgorithms;
+        // Active algorithm set for this session; frozen from the server's
+        // pluggable AlgorithmSelection in the ctor (see below).
+        private readonly FrozenAlgorithmCollection<KexAlgorithm> _keyExchangeAlgorithms;
+        internal readonly FrozenAlgorithmCollection<PublicKeyAlgorithm> _publicKeyAlgorithms;
+        private readonly FrozenAlgorithmCollection<CipherInfo> _encryptionAlgorithms;
+        private readonly FrozenAlgorithmCollection<HmacInfo> _hmacAlgorithms;
+        private readonly FrozenAlgorithmCollection<CompressionAlgorithm> _compressionAlgorithms;
 
         private readonly object _locker = new();
         private Socket _socket;
@@ -102,6 +102,12 @@ namespace FxSsh
             return (T)_services.FirstOrDefault(x => x is T);
         }
 
+        /// <summary>
+        /// Creates a session over an accepted socket. The algorithm selection
+        /// is frozen at construction (a null <paramref name="algorithms"/>
+        /// uses the library defaults); later ConfigureHazmat calls on the
+        /// same selection throw.
+        /// </summary>
         public Session(Socket socket, Dictionary<string, string> hostKey, string serverBanner, AlgorithmSelection algorithms = null)
         {
             ArgumentNullException.ThrowIfNull(socket);
@@ -115,10 +121,13 @@ namespace FxSsh
             // The server's algorithm catalog (mutable only via
             // SshServer.Algorithms.ConfigureHazmat before the server starts)
             // is the source of truth for every category. The per-session
-            // dictionaries are snapshots taken at construction: once the
-            // server has started, no mutation path exists (ConfigureHazmat
-            // throws), so in-flight sessions are isolated by design.
+            // selections are a snapshot frozen right here - BuildSelection is
+            // idempotent, so SshServer.Start's earlier freeze is reused - so
+            // every construction path ends up with a valid immutable
+            // snapshot, and later ConfigureHazmat calls on the same
+            // selection throw.
             algorithms ??= new AlgorithmSelection();
+            algorithms.BuildSelection(null);
             _publicKeyAlgorithms = algorithms.HostKeySelection;
             _keyExchangeAlgorithms = algorithms.KeyExchangeSelection;
             _encryptionAlgorithms = algorithms.EncryptionSelection;

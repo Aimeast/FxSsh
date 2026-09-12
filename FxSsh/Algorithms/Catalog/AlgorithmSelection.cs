@@ -3,16 +3,23 @@ using System.Collections.Generic;
 
 namespace FxSsh.Algorithms.Catalog
 {
+    /// <summary>
+    /// The frozen per-category algorithm selections a server negotiates with.
+    /// Each property is a name → factory lookup whose <c>Keys</c> enumerates
+    /// in the configured preference order - the exact order advertised in the
+    /// KEXINIT name-lists - so the enumeration order is part of the contract,
+    /// not an implementation detail.
+    /// </summary>
     public class AlgorithmSelection
     {
         private readonly AlgorithmCatalog _catalog = new();
         private bool _built = false;
 
-        public IReadOnlyDictionary<string, Func<string, PublicKeyAlgorithm>> HostKeySelection { get; private set; }
-        public IReadOnlyDictionary<string, Func<string, KexAlgorithm>> KeyExchangeSelection { get; private set; }
-        public IReadOnlyDictionary<string, Func<string, CipherInfo>> EncryptionSelection { get; private set; }
-        public IReadOnlyDictionary<string, Func<string, HmacInfo>> HmacSelection { get; private set; }
-        public IReadOnlyDictionary<string, Func<string, CompressionAlgorithm>> CompressionSelection { get; private set; }
+        public FrozenAlgorithmCollection<PublicKeyAlgorithm> HostKeySelection { get; private set; }
+        public FrozenAlgorithmCollection<KexAlgorithm> KeyExchangeSelection { get; private set; }
+        public FrozenAlgorithmCollection<CipherInfo> EncryptionSelection { get; private set; }
+        public FrozenAlgorithmCollection<HmacInfo> HmacSelection { get; private set; }
+        public FrozenAlgorithmCollection<CompressionAlgorithm> CompressionSelection { get; private set; }
 
         /// <summary>
         /// Customizes the per-server algorithm catalog. May only be called
@@ -37,15 +44,16 @@ namespace FxSsh.Algorithms.Catalog
 
         /// <summary>
         /// Freezes the catalog into the read-only per-category selections.
-        /// Idempotent: a later call (e.g. after a Stop/Start cycle) reuses the
-        /// frozen snapshot instead of rebuilding.
+        /// Idempotent: a later call (e.g. after a Stop/Start cycle, or from
+        /// Session's constructor) reuses the frozen snapshot instead of
+        /// rebuilding.
         /// </summary>
         internal void BuildSelection(Action<AlgorithmCatalog> logger)
         {
             if (_built)
                 return;
             _built = true;
-            logger(_catalog);
+            logger?.Invoke(_catalog);
             HostKeySelection = _catalog.HostKeyCollection.BuildCollection();
             KeyExchangeSelection = _catalog.KeyExchangeCollection.BuildCollection();
             EncryptionSelection = _catalog.EncryptionCollection.BuildCollection();

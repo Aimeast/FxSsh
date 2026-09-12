@@ -37,7 +37,10 @@ namespace FxSsh.Algorithms.Catalog
         /// <summary>
         /// Registers a user-contributed algorithm. It participates in
         /// negotiation (subject to <paramref name="name"/> ordering) and is
-        /// reported by the startup "custom algorithms" log.
+        /// reported by the startup "custom algorithms" log. When an entry
+        /// with the same name already exists it is replaced in place
+        /// (keeping its position), which also re-enables an entry seeded as
+        /// <see cref="AlgorithmTag.Disable"/>.
         /// </summary>
         public void Add(string name, Func<string, T> factory) =>
             Add(new AlgorithmDefine<T>(name, AlgorithmTag.Custom, true, factory));
@@ -61,24 +64,27 @@ namespace FxSsh.Algorithms.Catalog
 
         /// <summary>
         /// Excludes an entry from negotiation without deleting it, tagging it
-        /// <see cref="AlgorithmTag.Disable"/>. Returns false when
-        /// <paramref name="name"/> is unknown.
+        /// <see cref="AlgorithmTag.Disable"/>. Throws
+        /// <see cref="KeyNotFoundException"/> when <paramref name="name"/> is
+        /// unknown - a misspelled name must not silently leave the algorithm
+        /// negotiable.
         /// </summary>
-        public bool Disable(string name)
+        public void Disable(string name)
         {
             var index = IndexOf(name);
             if (index < 0)
-                return false;
+                throw new KeyNotFoundException($"Algorithm '{name}' was not found in the collection.");
             _items[index] = _items[index] with { Tag = AlgorithmTag.Disable };
-            return true;
         }
 
         /// <summary>
         /// Re-enables an entry seeded as <see cref="AlgorithmTag.Disable"/>
         /// (a legacy algorithm kept out of negotiation by default): the entry
         /// becomes negotiable, tagged <see cref="AlgorithmTag.Obsolete"/> so
-        /// the startup log warns about it. Throws when
-        /// <paramref name="name"/> is unknown.
+        /// the startup log warns about it. A no-op for entries that are
+        /// already negotiable (BuiltIn/Custom/Alias/Obsolete). Throws
+        /// <see cref="KeyNotFoundException"/> when <paramref name="name"/> is
+        /// unknown.
         /// </summary>
         public void Enable(string name)
         {
@@ -89,13 +95,17 @@ namespace FxSsh.Algorithms.Catalog
                 _items[index] = _items[index] with { Tag = AlgorithmTag.Obsolete };
         }
 
-        public bool Remove(string name)
+        /// <summary>
+        /// Deletes an entry. Throws <see cref="KeyNotFoundException"/> when
+        /// <paramref name="name"/> is unknown - seeded entries always exist,
+        /// so a misspelled name must fail loudly rather than remove nothing.
+        /// </summary>
+        public void Remove(string name)
         {
             var index = IndexOf(name);
             if (index < 0)
-                return false;
+                throw new KeyNotFoundException($"Algorithm '{name}' was not found in the collection.");
             _items.RemoveAt(index);
-            return true;
         }
 
         public void Clear() => _items.Clear();
