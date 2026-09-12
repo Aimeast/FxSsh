@@ -103,6 +103,17 @@ namespace FxSsh.Algorithms.Catalog
         public IEnumerable<string> Names => _items.Select(x => x.Name);
 
         /// <summary>
+        /// Names that survive freezing - what negotiation can actually pick -
+        /// in the same preference order <see cref="BuildCollection"/> freezes:
+        /// Disable-tagged entries and entries whose platform probe failed are
+        /// excluded.
+        /// </summary>
+        public IEnumerable<string> NegotiableNames => _items.Where(IsNegotiable).Select(x => x.Name);
+
+        private static bool IsNegotiable(AlgorithmDefine<T> x) =>
+            x.Tag != AlgorithmTag.Disable && x.Supported;
+
+        /// <summary>
         /// Freezes the builder into a read-only snapshot. Entries tagged
         /// <see cref="AlgorithmTag.Disable"/> and entries whose platform probe
         /// failed are excluded; the surviving entries keep their configured
@@ -110,7 +121,7 @@ namespace FxSsh.Algorithms.Catalog
         /// </summary>
         public FrozenAlgorithmCollection<T> BuildCollection() =>
             new(_items
-                .Where(x => x.Tag != AlgorithmTag.Disable && x.Supported)
+                .Where(IsNegotiable)
                 .Select(x => new KeyValuePair<string, Func<string, T>>(x.Name, x.Factory))
                 .ToArray());
 

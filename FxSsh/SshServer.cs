@@ -76,11 +76,11 @@ namespace FxSsh
         {
             if (Log.IsEnabled(LogLevel.Info))
             {
-                var hostKey = catalog.HostKeyCollection.Names.Intersect(_hostKey.Keys);
-                var kex = catalog.KeyExchangeCollection.Names;
-                var cipher = catalog.EncryptionCollection.Names;
-                var hmac = catalog.HmacCollection.Names;
-                var compression = catalog.CompressionCollection.Names;
+                var hostKey = catalog.HostKeyCollection.NegotiableNames.Intersect(_hostKey.Keys);
+                var kex = catalog.KeyExchangeCollection.NegotiableNames;
+                var cipher = catalog.EncryptionCollection.NegotiableNames;
+                var hmac = catalog.HmacCollection.NegotiableNames;
+                var compression = catalog.CompressionCollection.NegotiableNames;
 
                 Log.Info("Server cipher suites: " +
                     $"hostkey=[{string.Join(",", hostKey)}], kex=[{string.Join(",", kex)}], " +
