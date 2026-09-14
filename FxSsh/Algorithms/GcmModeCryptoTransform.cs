@@ -11,9 +11,9 @@ namespace FxSsh.Algorithms
     /// processes bytes incrementally: each SSH packet is one atomic AEAD
     /// invocation with its own 12-byte nonce and a 16-byte auth tag. This
     /// class therefore does NOT pretend to be a streaming transform; it
-    /// is consumed by Session.Send/ReceiveMessage through the dedicated
-    /// AEAD entry points (EncryptAead / DecryptAead) on EncryptionAlgorithm,
-    /// which in turn call Encrypt / Decrypt here.
+    /// implements <see cref="IAeadTransform"/> and is consumed by
+    /// Session.Send/ReceiveMessage through the dedicated AEAD entry points
+    /// (EncryptAead / DecryptPacketLength / DecryptAead) on EncryptionAlgorithm.
     ///
     /// Hot-path allocation profile: zero. The 12-byte nonce is a reused
     /// instance field (only the 8-byte counter half is refreshed per
@@ -32,8 +32,10 @@ namespace FxSsh.Algorithms
     /// first packet uses the IV's last 8 bytes verbatim as the counter, and
     /// each subsequent packet adds 1. We mirror that exactly: counter starts
     /// at the IV's last 8 bytes and is advanced once per packet, big-endian.
+    /// The sequence number passed in by Session is not used (RFC 5647 keys
+    /// the nonce off the IV, not the packet sequence number).
     /// </summary>
-    public sealed class GcmModeCryptoTransform
+    public sealed class GcmModeCryptoTransform : IAeadTransform
     {
         private readonly AesGcm _gcm;
         // Reused 12-byte nonce: [0..4] is the fixed field (set once from the
@@ -66,37 +68,45 @@ namespace FxSsh.Algorithms
         public int TagBytes => _tagBytes;
 
         /// <summary>
+        /// GCM transmits packet_length in plaintext, so this is an identity
+        /// pass-through of the 4 bytes as a big-endian length.
+        /// </summary>
+        public int DecryptPacketLength(uint sequenceNumber, ReadOnlySpan<byte> encryptedLength)
+            => encryptedLength[0] << 24 | encryptedLength[1] << 16 | encryptedLength[2] << 8 | encryptedLength[3];
+
+        /// <summary>
         /// Encrypt one SSH packet straight into <paramref name="destination"/>:
-        /// <paramref name="aad"/> is the 4-byte plaintext packet_length
-        /// (RFC 5647 section 7.3 - authenticated but not encrypted);
-        /// <paramref name="plaintext"/> is padding_length || payload || padding.
-        /// Writes ciphertext || tag, ready to follow the plaintext packet_length
-        /// on the wire as [packet_length(4)][ciphertext][tag(16)].
+        /// <paramref name="frame"/> is [packet_length(4)][padding_length||payload||padding].
+        /// Writes the plaintext length field, the ciphertext and the tag as
+        /// [packet_length(4, plaintext)][ciphertext][tag(16)] -- per RFC 5647
+        /// section 7.3 the 4-byte plaintext packet_length is GCM's Additional
+        /// Authenticated Data (authenticated but not encrypted).
         ///
         /// <paramref name="destination"/> must be at least
-        /// <paramref name="plaintext"/>.Length + <see cref="TagBytes"/> long.
+        /// <paramref name="frame"/>.Length + <see cref="TagBytes"/> long.
         /// No allocation on the hot path - the nonce is a reused instance
         /// buffer and the output lands directly in the caller's span.
         /// </summary>
-        public void Encrypt(ReadOnlySpan<byte> aad, ReadOnlySpan<byte> plaintext, Span<byte> destination)
+        public void Encrypt(uint sequenceNumber, ReadOnlySpan<byte> frame, Span<byte> destination)
         {
-            if (destination.Length < plaintext.Length + _tagBytes)
+            if (destination.Length < frame.Length + _tagBytes)
                 throw new ArgumentException("Destination too short for GCM ciphertext and tag.", nameof(destination));
 
             RefreshNonce();
+            frame[..4].CopyTo(destination);
             _gcm.Encrypt(_nonce,
-                plaintext,
-                destination[..plaintext.Length],
-                destination[plaintext.Length..],
-                aad);
+                frame[4..],
+                destination[4..(4 + frame.Length - 4)],
+                destination[(4 + frame.Length - 4)..],
+                frame[..4]);
             AdvanceCounter();
         }
 
         /// <summary>
-        /// Decrypt one SSH packet straight into <paramref name="plaintextDestination"/>:
-        /// <paramref name="aad"/> is the 4-byte plaintext packet_length
-        /// (RFC 5647 section 7.3 - authenticated but not encrypted);
-        /// <paramref name="ciphertextWithTag"/> is ciphertext || tag.
+        /// Authenticate and decrypt one SSH packet straight into
+        /// <paramref name="plaintextDestination"/>: <paramref name="lengthField"/>
+        /// is the 4-byte plaintext packet_length (GCM's AAD per RFC 5647
+        /// section 7.3) and <paramref name="ciphertextWithTag"/> is ciphertext || tag.
         /// Throws CryptographicException on tag mismatch - which Session maps to
         /// the same DisconnectReason.MacError used for HMAC verification failure,
         /// matching RFC 4253 section 6.4 guidance.
@@ -105,7 +115,7 @@ namespace FxSsh.Algorithms
         /// <paramref name="ciphertextWithTag"/>.Length - <see cref="TagBytes"/>
         /// long. No allocation on the hot path.
         /// </summary>
-        public void Decrypt(ReadOnlySpan<byte> aad, ReadOnlySpan<byte> ciphertextWithTag, Span<byte> plaintextDestination)
+        public void Decrypt(uint sequenceNumber, ReadOnlySpan<byte> lengthField, ReadOnlySpan<byte> ciphertextWithTag, Span<byte> plaintextDestination)
         {
             if (ciphertextWithTag.Length < _tagBytes)
                 throw new ArgumentException("GCM ciphertext shorter than tag.", nameof(ciphertextWithTag));
@@ -118,7 +128,7 @@ namespace FxSsh.Algorithms
                 ciphertextWithTag[..plaintextLength],
                 ciphertextWithTag[plaintextLength..],
                 plaintextDestination[..plaintextLength],
-                aad);
+                lengthField);
             AdvanceCounter();
         }
 

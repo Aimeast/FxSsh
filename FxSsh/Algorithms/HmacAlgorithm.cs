@@ -30,6 +30,18 @@ namespace FxSsh.Algorithms
         // the runtime type on every per-packet MAC.
         private readonly byte _kind; // 0 = HMACSHA256, 1 = HMACSHA512, 2 = fallback
 
+        /// <summary>
+        /// Subclassing hook for plugin MAC algorithms implemented outside the
+        /// library (e.g. umac-64@openssh.com / umac-128@openssh.com in
+        /// FxSsh.Tests). The subclass overrides <see cref="DigestLength"/> and
+        /// the Span <see cref="ComputeHash(ReadOnlySpan{byte}, ReadOnlySpan{byte}, uint, Span{byte})"/>
+        /// overload; the byte[] overloads (cold key-exchange path) are not
+        /// used for plugin MACs and must not be called on them.
+        /// </summary>
+        protected HmacAlgorithm()
+        {
+        }
+
         public HmacAlgorithm(KeyedHashAlgorithm algorithm, int keySize, byte[] key)
         {
             ArgumentNullException.ThrowIfNull(algorithm);
@@ -51,7 +63,7 @@ namespace FxSsh.Algorithms
                 : (byte)2;
         }
 
-        public int DigestLength => _digestLength;
+        public virtual int DigestLength => _digestLength;
 
         /// <summary>
         /// Compute MAC over <paramref name="input"/> only (b empty), returning a
@@ -95,7 +107,7 @@ namespace FxSsh.Algorithms
         /// the ciphertext), matching how Session.ReceiveMessage splits the
         /// ETM/non-ETM MAC inputs.
         /// </summary>
-        public void ComputeHash(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, uint sequence, Span<byte> destination)
+        public virtual void ComputeHash(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, uint sequence, Span<byte> destination)
         {
             if (destination.Length < _digestLength)
                 throw new ArgumentException("Destination too short for MAC.", nameof(destination));

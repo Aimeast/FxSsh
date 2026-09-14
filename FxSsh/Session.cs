@@ -13,6 +13,7 @@ using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
 using FxSsh.Algorithms;
+using FxSsh.Algorithms.Catalog;
 using FxSsh.Logging;
 using FxSsh.Messages;
 using FxSsh.Messages.Connection;
@@ -37,13 +38,13 @@ namespace FxSsh
         // RFC 4253 section 6: minimum packet size is 16 bytes total, i.e. packet_length >= 12.
         internal const int MinimumPacketLength = 12;
 
-        // Active algorithm set for this session; resolved from the server's
-        // AlgorithmSelection in the ctor (see below).
-        private readonly Dictionary<string, Func<KexAlgorithm>> _keyExchangeAlgorithms;
-        internal readonly Dictionary<string, Func<string, PublicKeyAlgorithm>> _publicKeyAlgorithms;
-        private readonly Dictionary<string, Func<CipherInfo>> _encryptionAlgorithms;
-        private readonly Dictionary<string, Func<HmacInfo>> _hmacAlgorithms;
-        private readonly Dictionary<string, Func<CompressionAlgorithm>> _compressionAlgorithms;
+        // Active algorithm set for this session; frozen from the server's
+        // pluggable AlgorithmSelection in the ctor (see below).
+        private readonly FrozenAlgorithmCollection<KexAlgorithm> _keyExchangeAlgorithms;
+        internal readonly FrozenAlgorithmCollection<PublicKeyAlgorithm> _publicKeyAlgorithms;
+        private readonly FrozenAlgorithmCollection<CipherInfo> _encryptionAlgorithms;
+        private readonly FrozenAlgorithmCollection<HmacInfo> _hmacAlgorithms;
+        private readonly FrozenAlgorithmCollection<CompressionAlgorithm> _compressionAlgorithms;
 
         private readonly object _locker = new();
         private Socket _socket;
@@ -101,6 +102,12 @@ namespace FxSsh
             return (T)_services.FirstOrDefault(x => x is T);
         }
 
+        /// <summary>
+        /// Creates a session over an accepted socket. The algorithm selection
+        /// is frozen at construction (a null <paramref name="algorithms"/>
+        /// uses the library defaults); later ConfigureHazmat calls on the
+        /// same selection throw.
+        /// </summary>
         public Session(Socket socket, Dictionary<string, string> hostKey, string serverBanner, AlgorithmSelection algorithms = null)
         {
             ArgumentNullException.ThrowIfNull(socket);
@@ -111,13 +118,21 @@ namespace FxSsh
             _hostKey = hostKey.ToDictionary(s => s.Key, s => s.Value);
             ServerVersion = serverBanner;
 
-            // Null selectors resolve to every algorithm supported on this
-            // platform; subsets are picked by name from AlgorithmRegistry.
-            _keyExchangeAlgorithms = AlgorithmRegistry.ResolveKeyExchange(algorithms?.KeyExchangeAlgorithms);
-            _publicKeyAlgorithms = AlgorithmRegistry.ResolveHostKey(algorithms?.HostKeyAlgorithms);
-            _encryptionAlgorithms = AlgorithmRegistry.ResolveEncryption(algorithms?.EncryptionAlgorithms);
-            _hmacAlgorithms = AlgorithmRegistry.ResolveMac(algorithms?.MacAlgorithms);
-            _compressionAlgorithms = AlgorithmRegistry.ResolveCompression(algorithms?.CompressionAlgorithms);
+            // The server's algorithm catalog (mutable only via
+            // SshServer.Algorithms.ConfigureHazmat before the server starts)
+            // is the source of truth for every category. The per-session
+            // selections are a snapshot frozen right here - BuildSelection is
+            // idempotent, so SshServer.Start's earlier freeze is reused - so
+            // every construction path ends up with a valid immutable
+            // snapshot, and later ConfigureHazmat calls on the same
+            // selection throw.
+            algorithms ??= new AlgorithmSelection();
+            algorithms.BuildSelection(null);
+            _publicKeyAlgorithms = algorithms.HostKeySelection;
+            _keyExchangeAlgorithms = algorithms.KeyExchangeSelection;
+            _encryptionAlgorithms = algorithms.EncryptionSelection;
+            _hmacAlgorithms = algorithms.HmacSelection;
+            _compressionAlgorithms = algorithms.CompressionSelection;
 
             // RFC 8332: advertise which signature algorithms we accept for
             // publickey auth. OpenSSH 8.8+ refuses to sign unless the server
@@ -470,8 +485,10 @@ namespace FxSsh
                 // consumes it.
                 using var lenBuf = await ReadFromPipeAsync(4, token);
                 if (lenBuf.Length == 0) return null;
-                var lenSpan = lenBuf.Span;
-                var packetLength = lenSpan[0] << 24 | lenSpan[1] << 16 | lenSpan[2] << 8 | lenSpan[3];
+                // chacha20-poly1305@openssh.com encrypts the packet_length field,
+                // AES-GCM transmits it plaintext. DecryptPacketLength recovers the
+                // plaintext length either way before it can be validated/bounded.
+                var packetLength = _algorithms.ClientEncryption.DecryptPacketLength(_inboundPacketSequence, lenBuf.Span);
                 if (packetLength < MinimumPacketLength || packetLength > MaximumPacketLength)
                 {
                     throw new SshConnectionException(
@@ -481,7 +498,7 @@ namespace FxSsh
                 }
 
                 // packetLength bytes of ciphertext: padding_length || payload || padding,
-                // followed by the 16-byte GCM tag. Per RFC 5647 section 7.3 the 4-byte
+                // followed by the 16-byte auth tag. Per RFC 5647 section 7.3 the 4-byte
                 // plaintext packet_length (lenBuf) is GCM's Additional Authenticated
                 // Data -- authenticated but not encrypted, covered by the tag.
                 var tagLength = _algorithms.ClientEncryption.TagBytes;
@@ -495,10 +512,11 @@ namespace FxSsh
                 var plaintext = SshBuffers.Packets.Rent(packetLength);
                 try
                 {
-                    // AAD is exactly the 4-byte plaintext packet_length --
-                    // NOT the whole lenBuf rental (ArrayPool hands back at
-                    // least 16 bytes; OpenSSH authenticates exactly 4).
+                    // lengthField is the 4 on-wire length bytes: GCM's AAD, and the
+                    // chacha20-poly1305 tag input (the encrypted length is passed
+                    // verbatim - the transform decrypts/authenticates it itself).
                     _algorithms.ClientEncryption.DecryptAead(
+                        _inboundPacketSequence,
                         lenBuf.ReadOnlySpan,
                         ciphertextWithTag.Array.AsSpan(0, packetLength + tagLength),
                         plaintext);
@@ -802,15 +820,13 @@ namespace FxSsh
                     if (isAead)
                     {
                         // RFC 5647 section 3 + 7.3 AEAD layout:
-                        // [packet_length(4, plaintext)][ciphertext = encrypt(padding_length||payload||padding)][tag(16)].
-                        // The 4-byte plaintext packet_length is GCM's AAD
-                        // (authenticated but not encrypted). Encrypt straight into
-                        // the rented sendBuf - no intermediate ciphertext array.
-                        frame.Slice(0, 4).CopyTo(wire);
-                        _algorithms.ServerEncryption.EncryptAead(
-                            frame.Slice(0, 4),
-                            frame.Slice(4),
-                            wire.Slice(4));
+                        // [length_field(4)][ciphertext = encrypt(padding_length||payload||padding)][tag(16)].
+                        // The AEAD transform owns the length field and the inline
+                        // tag: GCM transmits packet_length as plaintext AAD
+                        // (authenticated but not encrypted), chacha20-poly1305@openssh.com
+                        // encrypts it. Encrypt straight into the rented sendBuf -
+                        // no intermediate ciphertext array.
+                        _algorithms.ServerEncryption.EncryptAead(_outboundPacketSequence, frame, wire);
                     }
                     else if (_algorithms.ServerHmacIsEtm)
                     {
@@ -987,9 +1003,9 @@ namespace FxSsh
 
             if (Log.IsEnabled(LogLevel.Info))
                 Log.Info("Client cipher suites: " +
-                    $"kex=[{string.Join(",", message.KeyExchangeAlgorithms)}], hostkey=[{string.Join(",", message.ServerHostKeyAlgorithms)}], " +
+                    $"hostkey=[{string.Join(",", message.ServerHostKeyAlgorithms)}], kex=[{string.Join(",", message.KeyExchangeAlgorithms)}], " +
                     $"cipher ctos=[{string.Join(",", message.EncryptionAlgorithmsClientToServer)}], stoc=[{string.Join(",", message.EncryptionAlgorithmsServerToClient)}], " +
-                    $"mac ctos=[{string.Join(",", message.MacAlgorithmsClientToServer)}], stoc=[{string.Join(",", message.MacAlgorithmsServerToClient)}], " +
+                    $"hmac ctos=[{string.Join(",", message.MacAlgorithmsClientToServer)}], stoc=[{string.Join(",", message.MacAlgorithmsServerToClient)}], " +
                     $"compression ctos=[{string.Join(",", message.CompressionAlgorithmsClientToServer)}], stoc=[{string.Join(",", message.CompressionAlgorithmsServerToClient)}].");
 
             KeysExchanged?.Invoke(this, new KeyExchangeArgs(this)
@@ -1025,7 +1041,7 @@ namespace FxSsh
 
             _exchangeContext.ClientKexInitPayload = message.GetPacket();
 
-            Log.Info($"Negotiated: kex={_exchangeContext.KeyExchange}, hostkey={_exchangeContext.PublicKey}, " +
+            Log.Info($"hostkey={_exchangeContext.PublicKey}, Negotiated: kex={_exchangeContext.KeyExchange}, " +
                 $"ctos={_exchangeContext.ClientEncryption}:{_exchangeContext.ClientHmac}:{_exchangeContext.ClientCompression}, " +
                 $"stoc={_exchangeContext.ServerEncryption}:{_exchangeContext.ServerHmac}:{_exchangeContext.ServerCompression}.");
 
@@ -1042,7 +1058,7 @@ namespace FxSsh
             // host-key-based dispatch would have misrouted to the DH parser.
             var kex = _exchangeContext.KeyExchange;
             if (kex.StartsWith("curve25519-", StringComparison.Ordinal) || kex.StartsWith("ecdh-", StringComparison.Ordinal)
-                || kex.StartsWith("mlkem", StringComparison.Ordinal))
+                || kex.StartsWith("mlkem", StringComparison.Ordinal) || kex.StartsWith("sntrup", StringComparison.Ordinal))
                 message = Message.LoadFrom<KeyExchangeECDhInitMessage>(message);
             else if (kex.StartsWith("diffie-hellman-", StringComparison.Ordinal))
                 message = Message.LoadFrom<KeyExchangeDhInitMessage>(message);
@@ -1053,12 +1069,12 @@ namespace FxSsh
 
         private void HandleMessage(KeyExchangeDhInitMessage message)
         {
-            var kexAlg = _keyExchangeAlgorithms[_exchangeContext.KeyExchange]();
             var hostKeyAlg = _publicKeyAlgorithms[_exchangeContext.PublicKey](_hostKey[_exchangeContext.PublicKey]);
-            var clientCipher = _encryptionAlgorithms[_exchangeContext.ClientEncryption]();
-            var serverCipher = _encryptionAlgorithms[_exchangeContext.ServerEncryption]();
-            var serverHmac = _hmacAlgorithms[_exchangeContext.ServerHmac]();
-            var clientHmac = _hmacAlgorithms[_exchangeContext.ClientHmac]();
+            var kexAlg = _keyExchangeAlgorithms[_exchangeContext.KeyExchange](null);
+            var clientCipher = _encryptionAlgorithms[_exchangeContext.ClientEncryption](null);
+            var serverCipher = _encryptionAlgorithms[_exchangeContext.ServerEncryption](null);
+            var serverHmac = _hmacAlgorithms[_exchangeContext.ServerHmac](null);
+            var clientHmac = _hmacAlgorithms[_exchangeContext.ClientHmac](null);
 
             var clientExchangeValue = message.E;
             var serverExchangeValue = kexAlg.CreateKeyExchange();
@@ -1086,12 +1102,12 @@ namespace FxSsh
 
         private void HandleMessage(KeyExchangeECDhInitMessage message)
         {
-            var kexAlg = _keyExchangeAlgorithms[_exchangeContext.KeyExchange]();
             var hostKeyAlg = _publicKeyAlgorithms[_exchangeContext.PublicKey](_hostKey[_exchangeContext.PublicKey]);
-            var clientCipher = _encryptionAlgorithms[_exchangeContext.ClientEncryption]();
-            var serverCipher = _encryptionAlgorithms[_exchangeContext.ServerEncryption]();
-            var serverHmac = _hmacAlgorithms[_exchangeContext.ServerHmac]();
-            var clientHmac = _hmacAlgorithms[_exchangeContext.ClientHmac]();
+            var kexAlg = _keyExchangeAlgorithms[_exchangeContext.KeyExchange](null);
+            var clientCipher = _encryptionAlgorithms[_exchangeContext.ClientEncryption](null);
+            var serverCipher = _encryptionAlgorithms[_exchangeContext.ServerEncryption](null);
+            var serverHmac = _hmacAlgorithms[_exchangeContext.ServerHmac](null);
+            var clientHmac = _hmacAlgorithms[_exchangeContext.ClientHmac](null);
 
             var clientExchangeValue = message.Q;
             // Hybrid PQ/T KEX (e.g. mlkem768x25519-sha256) must parse the
@@ -1437,8 +1453,8 @@ namespace FxSsh
                 ServerEncryption = serverEncryption,
                 ClientHmac = clientHmacAlg,
                 ServerHmac = serverHmacAlg,
-                ClientCompression = _compressionAlgorithms[_exchangeContext.ClientCompression](),
-                ServerCompression = _compressionAlgorithms[_exchangeContext.ServerCompression](),
+                ClientCompression = _compressionAlgorithms[_exchangeContext.ClientCompression](null),
+                ServerCompression = _compressionAlgorithms[_exchangeContext.ServerCompression](null),
                 ClientHmacIsEtm = clientHmac.IsEtm,
                 ServerHmacIsEtm = serverHmac.IsEtm,
             };
