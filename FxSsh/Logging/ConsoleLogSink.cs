@@ -13,6 +13,15 @@ namespace FxSsh.Logging
     /// </summary>
     public sealed class ConsoleLogSink : ILogSink
     {
+        /// <summary>
+        /// Writes one entry to the standard output stream in the
+        /// <c>yy-MM-dd HH:mm:ss LEVEL message</c> format, color-coding the
+        /// level token by severity and appending the exception text on a new
+        /// line when present.
+        /// </summary>
+        /// <param name="level">Severity of the entry; selects the level text and color.</param>
+        /// <param name="message">Pre-formatted message. Never null.</param>
+        /// <param name="exception">Optional exception to append below the message.</param>
         public void Write(LogLevel level, string message, Exception? exception = null)
         {
             var timestamp = DateTime.Now.ToString("yy-MM-dd HH:mm:ss");

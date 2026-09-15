@@ -8,7 +8,9 @@
     /// </summary>
     public sealed class SftpFileEntry
     {
+        /// <summary>Gets or sets the file name; relative within the directory for READDIR, the canonical absolute path for REALPATH.</summary>
         public string FileName { get; set; }
+        /// <summary>Gets or sets the entry's attributes; null when they cannot be determined.</summary>
         public SftpFileAttributes Attributes { get; set; }
     }
 }

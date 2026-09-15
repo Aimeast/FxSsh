@@ -11,6 +11,14 @@ using FxSsh.Logging;
 
 namespace FxSsh
 {
+    /// <summary>
+    /// Represents an SSH server that listens on a TCP endpoint and runs a
+    /// <see cref="Session"/> for every accepted client. Register host keys
+    /// with <see cref="AddHostKey(string, string)"/>, optionally adjust
+    /// <see cref="Algorithms"/>, then call <see cref="Start"/> or
+    /// <see cref="StartAsync(CancellationToken)"/> to begin accepting
+    /// connections.
+    /// </summary>
     public class SshServer : IDisposable, IAsyncDisposable
     {
         private readonly ConcurrentDictionary<long, Session> _sessions = [];
@@ -21,10 +29,19 @@ namespace FxSsh
 
         private TcpListener _listenser = null;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SshServer"/> class with
+        /// the default <see cref="StartingInfo"/>.
+        /// </summary>
         public SshServer()
             : this(new StartingInfo())
         { }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SshServer"/> class with
+        /// the specified starting information.
+        /// </summary>
+        /// <param name="info">The local address, port, and server banner to use.</param>
         public SshServer(StartingInfo info)
         {
             ArgumentNullException.ThrowIfNull(info);
@@ -32,6 +49,11 @@ namespace FxSsh
             StartingInfo = info;
         }
 
+        /// <summary>
+        /// Gets the starting information this server was created with: the
+        /// local address and port to bind, and the protocol version banner to
+        /// present to clients.
+        /// </summary>
         public StartingInfo StartingInfo { get; private set; }
 
         /// <summary>
@@ -45,12 +67,50 @@ namespace FxSsh
         /// </summary>
         public AlgorithmSelection Algorithms { get; } = new();
 
+        /// <summary>
+        /// Occurs when a client connection has been accepted and a
+        /// <see cref="Session"/> created for it, before the SSH handshake
+        /// starts. Handlers can configure the session or subscribe to its
+        /// events.
+        /// </summary>
         public event EventHandler<Session> ConnectionAccepted;
+
+        /// <summary>
+        /// Occurs when a session's protocol loop terminates with an
+        /// exception. This includes normal connection loss
+        /// (<see cref="DisconnectReason.ConnectionLost"/>, e.g. the client
+        /// closed the TCP connection), not only protocol errors.
+        /// </summary>
         public event EventHandler<Exception> ExceptionRaised;
 
+        /// <summary>
+        /// Starts the server and blocks until the listener is running.
+        /// </summary>
+        /// <exception cref="InvalidOperationException">The server is already started.</exception>
+        /// <exception cref="ObjectDisposedException">The server has been disposed.</exception>
         public void Start() => StartAsync().GetAwaiter().GetResult();
+
+        /// <summary>
+        /// Stops the server: closes the listener and disconnects every active
+        /// session. Blocks until the shutdown completes. A server that is not
+        /// running is left unchanged.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">The server has been disposed.</exception>
         public void Stop() => StopAsync().GetAwaiter().GetResult();
 
+        /// <summary>
+        /// Starts the server: freezes the algorithm selection built from
+        /// <see cref="Algorithms"/>, binds a TCP listener to the address and
+        /// port in <see cref="StartingInfo"/>, and begins accepting
+        /// connections asynchronously, each handled by a new
+        /// <see cref="Session"/>.
+        /// </summary>
+        /// <param name="cancellationToken">
+        /// A token that cancels the accept loop and the sessions it started.
+        /// </param>
+        /// <returns>A task that completes once the listener is running.</returns>
+        /// <exception cref="InvalidOperationException">The server is already started.</exception>
+        /// <exception cref="ObjectDisposedException">The server has been disposed.</exception>
         public Task StartAsync(CancellationToken cancellationToken = default)
         {
             CheckDisposed();
@@ -115,6 +175,12 @@ namespace FxSsh
             return result.TrimEnd('.');
         }
 
+        /// <summary>
+        /// Stops accepting connections and asynchronously disconnects every
+        /// active session. Does nothing if the server is not currently
+        /// running.
+        /// </summary>
+        /// <exception cref="ObjectDisposedException">The server has been disposed.</exception>
         public async Task StopAsync()
         {
             CheckDisposed();
@@ -135,6 +201,16 @@ namespace FxSsh
             await Task.WhenAll(disconnectTasks);
         }
 
+        /// <summary>
+        /// Registers a host key for a public key algorithm. Only the first key
+        /// registered under a given algorithm name is used; later calls with
+        /// the same name are ignored.
+        /// </summary>
+        /// <param name="type">
+        /// The host key algorithm name (e.g. "rsa-sha2-512",
+        /// "ecdsa-sha2-nistp256").
+        /// </param>
+        /// <param name="xml">The PEM-encoded private key for the algorithm.</param>
         public void AddHostKey(string type, string xml)
         {
             ArgumentNullException.ThrowIfNull(type);
@@ -231,6 +307,13 @@ namespace FxSsh
         }
 
         #region IDisposable
+        /// <summary>
+        /// Stops the server asynchronously (see <see cref="StopAsync"/>) and
+        /// marks it disposed. Subsequent calls have no effect; afterwards
+        /// <see cref="StartAsync(CancellationToken)"/> and
+        /// <see cref="StopAsync"/> throw
+        /// <see cref="ObjectDisposedException"/>.
+        /// </summary>
         public async ValueTask DisposeAsync()
         {
             if (Volatile.Read(ref _isDisposed) == 1)
@@ -240,6 +323,12 @@ namespace FxSsh
                 GC.SuppressFinalize(this);
         }
 
+        /// <summary>
+        /// Stops the server synchronously (see <see cref="Stop"/>) and marks
+        /// it disposed. Subsequent calls have no effect; afterwards
+        /// <see cref="Start"/> and <see cref="Stop"/> throw
+        /// <see cref="ObjectDisposedException"/>.
+        /// </summary>
         public void Dispose()
         {
             if (Volatile.Read(ref _isDisposed) == 1)

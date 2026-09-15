@@ -4,12 +4,25 @@ using System.Text;
 
 namespace FxSsh.Algorithms
 {
+    /// <summary>
+    /// The ECDSA host key algorithm over the NIST curves (RFC 5656),
+    /// producing ecdsa-sha2-nistp256/nistp384/nistp521 signatures.
+    /// Keys are stored as PKCS#8/PEM; signatures are converted between
+    /// the SSH (r,s) mpint blob and IEEE P1363 concatenation form.
+    /// </summary>
     public class EcdsaKey : PublicKeyAlgorithm
     {
         private readonly ECDsa _algorithm = ECDsa.Create();
         private readonly HashAlgorithmName _sha;
         private readonly string _curveName;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="EcdsaKey"/> class,
+        /// generating a key on the named curve when none is supplied.
+        /// </summary>
+        /// <param name="curveName">The NIST curve: "nistp256", "nistp384" or "nistp521".</param>
+        /// <param name="key">The key in PEM format, or an empty string to generate a new key.</param>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="curveName"/> is not a supported NIST curve.</exception>
         public EcdsaKey(string curveName, string key)
             : base(key)
         {
@@ -35,21 +48,40 @@ namespace FxSsh.Algorithms
             }
         }
 
+        /// <summary>
+        /// Gets the algorithm name, "ecdsa-sha2-" followed by the curve name
+        /// (RFC 5656 section 6.2), e.g. "ecdsa-sha2-nistp256".
+        /// </summary>
         public override string Name
         {
             get { return $"ecdsa-sha2-{_curveName}"; }
         }
 
+        /// <summary>
+        /// Imports a PEM-encoded key (PKCS#8 private key or SPKI public key).
+        /// </summary>
+        /// <param name="key">The PEM-encoded key.</param>
         public override void ImportKey(string key)
         {
             _algorithm.ImportFromPem(key);
         }
 
+        /// <summary>
+        /// Exports the private key as PKCS#8 PEM.
+        /// </summary>
+        /// <returns>The PEM-encoded private key.</returns>
         public override string ExportKey()
         {
             return _algorithm.ExportPkcs8PrivateKeyPem();
         }
 
+        /// <summary>
+        /// Loads an ECDSA public key from its SSH wire blob: the algorithm
+        /// name and curve name strings followed by the uncompressed EC point
+        /// Q (0x04 || X || Y), per RFC 5656 section 3.1.
+        /// </summary>
+        /// <param name="data">The key blob.</param>
+        /// <exception cref="CryptographicException">The blob names a different algorithm or uses a compressed curve point.</exception>
         public override void LoadKeyAndCertificatesData(byte[] data)
         {
             var reader = new SshDataReader(data);
@@ -69,6 +101,12 @@ namespace FxSsh.Algorithms
             _algorithm.ImportParameters(args);
         }
 
+        /// <summary>
+        /// Serializes the public key to the SSH wire blob: the algorithm and
+        /// curve name strings followed by the uncompressed EC point Q,
+        /// per RFC 5656 section 3.1.
+        /// </summary>
+        /// <returns>The key blob.</returns>
         public override byte[] CreateKeyAndCertificatesData()
         {
             var args = _algorithm.ExportParameters(false);
@@ -84,12 +122,25 @@ namespace FxSsh.Algorithms
                 .ToByteArray();
         }
 
+        /// <summary>
+        /// Verifies an ECDSA signature over the data. The SSH (r,s) blob is
+        /// converted to IEEE P1363 form before verification.
+        /// </summary>
+        /// <param name="data">The signed data.</param>
+        /// <param name="signature">The raw SSH signature blob (r and s as mpint).</param>
+        /// <returns>true when the signature is valid; otherwise false.</returns>
         public override bool VerifyData(byte[] data, byte[] signature)
         {
             var sig = SignatureBlobToP1363(signature);
             return _algorithm.VerifyData(data, sig, _sha, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
         }
 
+        /// <summary>
+        /// Verifies an ECDSA signature over a pre-computed hash.
+        /// </summary>
+        /// <param name="hash">The signed hash.</param>
+        /// <param name="signature">The raw SSH signature blob (r and s as mpint).</param>
+        /// <returns>true when the signature is valid; otherwise false.</returns>
         public override bool VerifyHash(byte[] hash, byte[] signature)
         {
             var sig = SignatureBlobToP1363(signature);
@@ -113,12 +164,24 @@ namespace FxSsh.Algorithms
             return bytes;
         }
 
+        /// <summary>
+        /// Signs the data with ECDSA, returning the SSH signature blob
+        /// (r and s as mpint values, RFC 5656 section 3.1.2).
+        /// </summary>
+        /// <param name="data">The data to sign.</param>
+        /// <returns>The raw SSH signature blob.</returns>
         public override byte[] SignData(byte[] data)
         {
             var sig = _algorithm.SignData(data, _sha, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
             return P1363ToSignatureBlob(sig);
         }
 
+        /// <summary>
+        /// Signs a pre-computed hash with ECDSA, returning the SSH signature
+        /// blob (r and s as mpint values).
+        /// </summary>
+        /// <param name="hash">The hash to sign.</param>
+        /// <returns>The raw SSH signature blob.</returns>
         public override byte[] SignHash(byte[] hash)
         {
             var sig = _algorithm.SignHash(hash, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);

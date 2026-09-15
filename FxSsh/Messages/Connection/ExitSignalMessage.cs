@@ -3,14 +3,14 @@
 namespace FxSsh.Messages.Connection
 {
     /// <summary>
-    /// SSH_MSG_CHANNEL_REQUEST "exit-signal" per RFC 4254 section 10.2.
+    /// SSH_MSG_CHANNEL_REQUEST "exit-signal" per RFC 4254 section 6.10.
     /// Sent instead of exit-status when the process was terminated by a signal.
     /// </summary>
     public class ExitSignalMessage : ChannelRequestMessage
     {
         /// <summary>
         /// Signal name WITHOUT the "SIG" prefix (e.g. "TERM", "KILL", "SEGV"),
-        /// or "SEGV" / core-dump indicator per RFC 4254 section 10.2.
+        /// per RFC 4254 section 6.10.
         /// </summary>
         public string SignalName { get; set; }
 
@@ -29,6 +29,8 @@ namespace FxSsh.Messages.Connection
         /// </summary>
         public string Language { get; set; } = "en";
 
+        /// <summary>Writes the exit-signal request into the outgoing packet; the request is always sent without asking for a reply.</summary>
+        /// <param name="writer">The writer used to serialize the message payload.</param>
         protected override void OnGetPacket(SshDataWriter writer)
         {
             RequestType = "exit-signal";

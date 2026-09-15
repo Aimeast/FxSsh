@@ -15,10 +15,36 @@ namespace FxSsh.Algorithms.Catalog
         private readonly AlgorithmCatalog _catalog = new();
         private bool _built = false;
 
+        /// <summary>
+        /// Gets the frozen host key (server signature) algorithms, enumerated
+        /// in configured preference order; null until the selection is built
+        /// at server start.
+        /// </summary>
         public FrozenAlgorithmCollection<PublicKeyAlgorithm> HostKeySelection { get; private set; }
+
+        /// <summary>
+        /// Gets the frozen key exchange algorithms, enumerated in configured
+        /// preference order; null until the selection is built at server start.
+        /// </summary>
         public FrozenAlgorithmCollection<KexAlgorithm> KeyExchangeSelection { get; private set; }
+
+        /// <summary>
+        /// Gets the frozen encryption (cipher) algorithms, enumerated in
+        /// configured preference order; null until the selection is built at
+        /// server start.
+        /// </summary>
         public FrozenAlgorithmCollection<CipherInfo> EncryptionSelection { get; private set; }
+
+        /// <summary>
+        /// Gets the frozen MAC algorithms, enumerated in configured preference
+        /// order; null until the selection is built at server start.
+        /// </summary>
         public FrozenAlgorithmCollection<HmacInfo> HmacSelection { get; private set; }
+
+        /// <summary>
+        /// Gets the frozen compression methods, enumerated in configured
+        /// preference order; null until the selection is built at server start.
+        /// </summary>
         public FrozenAlgorithmCollection<CompressionAlgorithm> CompressionSelection { get; private set; }
 
         /// <summary>

@@ -44,6 +44,14 @@ namespace FxSsh.Algorithms
         private readonly byte[] _counter;   // 8-byte big-endian invocation counter
         private readonly int _tagBytes = 16;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="GcmModeCryptoTransform"/> class,
+        /// seeding the nonce's 4-byte fixed field and the 8-byte big-endian invocation
+        /// counter from the IV.
+        /// </summary>
+        /// <param name="key">The AES key; 16 or 32 bytes (128 or 256 bits).</param>
+        /// <param name="iv">The 12-byte IV from key exchange: fixed(4) || invocation_counter(8) per RFC 5647 section 7.1.</param>
+        /// <exception cref="ArgumentException">The key is not 128 or 256 bits, or the IV is not 12 bytes.</exception>
         public GcmModeCryptoTransform(byte[] key, byte[] iv)
         {
             ArgumentNullException.ThrowIfNull(key);

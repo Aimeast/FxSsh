@@ -5,6 +5,12 @@ using System.Security.Cryptography;
 
 namespace FxSsh.Algorithms
 {
+    /// <summary>
+    /// Represents the server side of the SSH Diffie-Hellman key exchange
+    /// (RFC 4253 section 8) over the MODP groups of RFC 3526: 2048-bit
+    /// (group14), 4096-bit (group16), and 8192-bit (group18), all with
+    /// generator 2.
+    /// </summary>
     public class DiffieHellmanKex : KexAlgorithm
     {
         // https://tools.ietf.org/html/rfc3526
@@ -23,6 +29,14 @@ namespace FxSsh.Algorithms
         private BigInteger _g;
         private BigInteger _x;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="DiffieHellmanKex"/> class
+        /// with the specified hash and MODP group, and generates a random 640-bit
+        /// private exponent x.
+        /// </summary>
+        /// <param name="sha2Bitlen">The hash size in bits: 256 for SHA-256 or 512 for SHA-512.</param>
+        /// <param name="bitlen">The MODP group size in bits: 2048 (group14), 4096 (group16), or 8192 (group18) per RFC 3526.</param>
+        /// <exception cref="ArgumentException"><paramref name="sha2Bitlen"/> is not 256 or 512, or <paramref name="bitlen"/> is not 2048, 4096, or 8192.</exception>
         public DiffieHellmanKex(int sha2Bitlen, int bitlen)
         {
             switch (sha2Bitlen)
@@ -62,6 +76,13 @@ namespace FxSsh.Algorithms
             _x = BigInteger.Abs(new BigInteger(bytes));
         }
 
+        /// <summary>
+        /// Computes the server's public value f = g^x mod p.
+        /// </summary>
+        /// <returns>
+        /// f as a big-endian two's-complement byte array (a leading zero byte is
+        /// prepended when the high bit is set), not SSH-framed.
+        /// </returns>
         public override byte[] CreateKeyExchange()
         {
             var y = BigInteger.ModPow(_g, _x, _p);
@@ -69,6 +90,11 @@ namespace FxSsh.Algorithms
             return bytes;
         }
 
+        /// <summary>
+        /// Derives the shared secret K = e^x mod p from the client's public value e.
+        /// </summary>
+        /// <param name="keyEx">The client's public value e as an unsigned big-endian byte array.</param>
+        /// <returns>The shared secret K as a big-endian two's-complement byte array, not SSH-framed.</returns>
         public override byte[] DecryptKeyExchange(byte[] keyEx)
         {
             ArgumentNullException.ThrowIfNull(keyEx);

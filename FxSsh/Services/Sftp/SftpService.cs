@@ -92,11 +92,23 @@ namespace FxSsh.Services.Sftp
         private byte[] _pendingBytes;
         private int _handleCursor;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SftpService"/> class backed
+        /// by a new <see cref="LocalFileSystem"/> rooted at <paramref name="rootPath"/>
+        /// in read-write mode.
+        /// </summary>
+        /// <param name="rootPath">Directory that becomes the visible SFTP root ("/").</param>
         public SftpService(string rootPath)
             : this(new LocalFileSystem(rootPath), readOnly: false)
         {
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SftpService"/> class backed
+        /// by a new <see cref="LocalFileSystem"/> rooted at <paramref name="rootPath"/>.
+        /// </summary>
+        /// <param name="rootPath">Directory that becomes the visible SFTP root ("/").</param>
+        /// <param name="readOnly">True to make the server reject every mutating SFTP request with SSH_FX_PERMISSION_DENIED.</param>
         public SftpService(string rootPath, bool readOnly)
             : this(new LocalFileSystem(rootPath), readOnly)
         {
@@ -120,11 +132,22 @@ namespace FxSsh.Services.Sftp
         {
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SftpService"/> class backed
+        /// by a custom <see cref="ISftpFileSystem"/> implementation, in read-write mode.
+        /// </summary>
+        /// <param name="fileSystem">Backend that performs the actual file system operations.</param>
         public SftpService(ISftpFileSystem fileSystem)
             : this(fileSystem, readOnly: false)
         {
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="SftpService"/> class backed
+        /// by a custom <see cref="ISftpFileSystem"/> implementation.
+        /// </summary>
+        /// <param name="fileSystem">Backend that performs the actual file system operations.</param>
+        /// <param name="readOnly">True to make the server reject every mutating SFTP request with SSH_FX_PERMISSION_DENIED.</param>
         public SftpService(ISftpFileSystem fileSystem, bool readOnly)
         {
             ArgumentNullException.ThrowIfNull(fileSystem);
@@ -179,6 +202,14 @@ namespace FxSsh.Services.Sftp
             CloseReceived += (_, exitCode) => channel.SendClose(exitCode);
         }
 
+        /// <summary>
+        /// Feeds raw channel data into the engine. Bytes are buffered until
+        /// one or more complete length-prefixed SFTP frames have arrived;
+        /// each complete frame is dispatched to its request handler and any
+        /// remainder is kept for the next call. A frame with an empty or
+        /// oversized length prefix discards the buffered data.
+        /// </summary>
+        /// <param name="data">Inbound channel data; may contain partial or multiple SFTP frames.</param>
         public void OnData(ReadOnlyMemory<byte> data)
         {
             // The incoming slice is over the SSH receive buffer, which is
@@ -221,6 +252,12 @@ namespace FxSsh.Services.Sftp
             }
         }
 
+        /// <summary>
+        /// Tears the engine down in response to the peer closing the channel:
+        /// cancels the token that <see cref="WaitForClose"/> blocks on,
+        /// releases every open handle, and raises <see cref="CloseReceived"/>
+        /// with an exit code of 0.
+        /// </summary>
         public void OnClose()
         {
             _cancellationTokenSource.Cancel();
@@ -228,6 +265,7 @@ namespace FxSsh.Services.Sftp
             CloseReceived?.Invoke(this, 0);
         }
 
+        /// <summary>Blocks the calling thread until the engine is closed via <see cref="OnClose"/>.</summary>
         public void WaitForClose()
         {
             Task.Delay(-1, _cancellationTokenSource.Token).Wait();

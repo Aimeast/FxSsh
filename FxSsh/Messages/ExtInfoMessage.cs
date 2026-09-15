@@ -22,8 +22,15 @@ namespace FxSsh.Messages
         /// </summary>
         public Dictionary<string, string> Extensions { get; set; } = [];
 
+        /// <summary>
+        /// Gets the SSH message number for SSH_MSG_EXT_INFO (7).
+        /// </summary>
         public override byte MessageType => MessageNumber;
 
+        /// <summary>
+        /// Loads the extension count and the (name, value) pairs from the
+        /// payload.
+        /// </summary>
         protected override void OnLoad(SshDataReader reader)
         {
             var count = reader.ReadUInt32();
@@ -37,6 +44,11 @@ namespace FxSsh.Messages
             Extensions = dict;
         }
 
+        /// <summary>
+        /// Writes the extension count and the (name, value) pairs to the
+        /// payload, in ascending order by name as required by RFC 8308
+        /// section 2.2.
+        /// </summary>
         protected override void OnGetPacket(SshDataWriter writer)
         {
             writer.Write((uint)Extensions.Count);

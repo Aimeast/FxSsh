@@ -49,6 +49,8 @@ namespace FxSsh.Messages.Connection
             OriginatorPort = originatorPort;
         }
 
+        /// <summary>Writes the forwarded-tcpip channel open into the outgoing packet.</summary>
+        /// <param name="writer">The writer used to serialize the message payload.</param>
         protected override void OnGetPacket(SshDataWriter writer)
         {
             writer.Write("forwarded-tcpip", Encoding.ASCII);

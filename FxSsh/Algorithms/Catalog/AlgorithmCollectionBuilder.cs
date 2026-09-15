@@ -108,8 +108,16 @@ namespace FxSsh.Algorithms.Catalog
             _items.RemoveAt(index);
         }
 
+        /// <summary>
+        /// Removes every entry, including the seeded defaults.
+        /// </summary>
         public void Clear() => _items.Clear();
 
+        /// <summary>
+        /// Gets every configured entry name in preference order, including
+        /// Disable-tagged and platform-unsupported entries; use
+        /// <see cref="NegotiableNames"/> for the names that survive freezing.
+        /// </summary>
         public IEnumerable<string> Names => _items.Select(x => x.Name);
 
         /// <summary>
@@ -143,8 +151,16 @@ namespace FxSsh.Algorithms.Catalog
             return -1;
         }
 
+        /// <summary>
+        /// Returns an enumerator over the entries in configuration order.
+        /// </summary>
+        /// <returns>An enumerator of the catalog entries.</returns>
         public IEnumerator<AlgorithmDefine<T>> GetEnumerator() => _items.GetEnumerator();
 
+        /// <summary>
+        /// Returns an enumerator over the entries in configuration order.
+        /// </summary>
+        /// <returns>An enumerator of the catalog entries.</returns>
         IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
     }
 }

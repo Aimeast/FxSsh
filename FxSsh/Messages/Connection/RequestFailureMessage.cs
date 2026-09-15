@@ -10,13 +10,18 @@ namespace FxSsh.Messages.Connection
     {
         internal const byte MessageNumber = 82;
 
+        /// <summary>Gets the message number that identifies this message as SSH_MSG_REQUEST_FAILURE.</summary>
         public override byte MessageType { get { return MessageNumber; } }
 
+        /// <summary>Reads the message payload from the incoming packet; this message carries no payload.</summary>
+        /// <param name="reader">The reader positioned at the start of the message payload.</param>
         protected override void OnLoad(SshDataReader reader)
         {
             // No payload per RFC 4254 section 4.
         }
 
+        /// <summary>Writes the message payload into the outgoing packet; this message carries no payload.</summary>
+        /// <param name="writer">The writer used to serialize the message payload.</param>
         protected override void OnGetPacket(SshDataWriter writer)
         {
         }

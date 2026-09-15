@@ -32,6 +32,12 @@ namespace FxSsh.Algorithms
         // CreateKeyExchange when assembling S_REPLY.
         private byte[] _serverCiphertext;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="MlkemX25519Kex"/> class,
+        /// generating the server's X25519 key pair and selecting SHA-256; the
+        /// ML-KEM-768 encapsulation is performed against the client's key during
+        /// <see cref="DecryptKeyExchange"/>.
+        /// </summary>
         public MlkemX25519Kex()
         {
             _x25519 = X25519DiffieHellman.GenerateKey();

@@ -9,10 +9,10 @@ namespace FxSsh
     /// <summary>
     /// TLS-first ArrayPool dedicated to SSH packet buffers (16 B - 64 KiB).
     ///
-    /// Why not <see cref="ArrayPool{T}.Create"/>? That returns a
+    /// Why not <see cref="ArrayPool{T}.Create()"/>? That returns a
     /// ConfigurableArrayPool whose per-bucket SpinLock serializes every
     /// Rent/Return, which collapsed GCM single-connection throughput when it
-    /// was tried during development. Why not <see cref="ArrayPool{byte}.Shared"/>?
+    /// was tried during development. Why not <see cref="ArrayPool{T}.Shared"/>?
     /// Shared is already lock-free, but it is global - every other library in
     /// the process competes for the same buckets, and its per-core stacks can
     /// be exhausted under extreme concurrency, degrading into fresh

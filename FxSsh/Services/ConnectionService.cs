@@ -13,6 +13,13 @@ using FxSsh.Messages.Connection;
 
 namespace FxSsh.Services
 {
+    /// <summary>
+    /// Implements the "ssh-connection" service (RFC 4254): opens and
+    /// multiplexes channels, dispatches channel data, window adjust, EOF and
+    /// close messages, and handles channel requests such as "pty-req", "env",
+    /// "shell", "exec" and "subsystem" plus global requests for reverse
+    /// TCP/IP port forwarding (RFC 4254 section 7).
+    /// </summary>
     public class ConnectionService : SshService
     {
         private readonly object _locker = new();
@@ -35,6 +42,12 @@ namespace FxSsh.Services
         // matches against the bound port the peer learned from our SUCCESS).
         private readonly Dictionary<(string address, uint port), PortForwardingService> _forwarders = new();
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="ConnectionService"/>
+        /// class and starts its asynchronous channel-message loop.
+        /// </summary>
+        /// <param name="session">The session that instantiated the service after successful user authentication.</param>
+        /// <param name="auth">The authentication result accepted by <see cref="UserAuthService.UserAuth"/>; attached to event args so handlers can apply per-user policy.</param>
         public ConnectionService(Session session, UserAuthArgs auth)
             : base(session)
         {
@@ -45,10 +58,36 @@ namespace FxSsh.Services
             Task.Run(MessageLoopAsync);
         }
 
+        /// <summary>
+        /// Occurs when the client requests a shell ("shell") or a command
+        /// execution ("exec") on a session channel. For backward
+        /// compatibility it is also raised for "subsystem" requests (with
+        /// <see cref="CommandRequestedArgs.ShellType"/> "subsystem") - prefer
+        /// <see cref="SubsystemRequested"/> there. Set
+        /// <see cref="CommandRequestedArgs.Agreed"/> to true to accept;
+        /// otherwise SSH_MSG_CHANNEL_FAILURE is sent when the client asked for
+        /// a reply.
+        /// </summary>
         public event EventHandler<CommandRequestedArgs> CommandOpened;
+        /// <summary>
+        /// Occurs when the client requests a subsystem (RFC 4254 section 6.5,
+        /// e.g. "sftp"). When handled, <see cref="SubsystemRequestedArgs.Agreed"/>
+        /// overrides the legacy <see cref="CommandOpened"/> decision for this
+        /// request.
+        /// </summary>
         public event EventHandler<SubsystemRequestedArgs> SubsystemRequested;
+        /// <summary>Occurs when the client sets an environment variable with an "env" channel request (RFC 4254 section 6.4).</summary>
         public event EventHandler<EnvironmentArgs> EnvReceived;
+        /// <summary>Occurs when the client requests a pseudo-terminal with a "pty-req" channel request (RFC 4254 section 6.2).</summary>
         public event EventHandler<PtyArgs> PtyReceived;
+        /// <summary>
+        /// Occurs when the client opens a TCP forwarding channel: "direct-tcpip"
+        /// for client-initiated forwarding, or "forwarded-tcpip" when a
+        /// connection arrives on a reverse-forwarded listener. The channel is
+        /// already confirmed at this point, so the event is informational
+        /// (target host, port and originator); no accept/reject decision is
+        /// sent back to the peer.
+        /// </summary>
         public event EventHandler<TcpRequestArgs> TcpForwardRequest;
 
         /// <summary>
@@ -58,6 +97,11 @@ namespace FxSsh.Services
         /// </summary>
         public event EventHandler<TcpForwardRequestArgs> TcpForwardRequestReceived;
 
+        /// <summary>
+        /// Stops the message loop, force-closes every open channel and
+        /// disposes every reverse-forward listener, since their TCP sockets
+        /// must not outlive the session.
+        /// </summary>
         protected internal override void CloseService()
         {
             _messageCts.Cancel();
@@ -230,7 +274,7 @@ namespace FxSsh.Services
 
         private void HandleTcpIpForward(GlobalRequestMessage message)
         {
-            // RFC 4254 section 7.2 payload: string address; uint port.
+            // RFC 4254 section 7.1 payload: string address; uint port.
             string address;
             uint port;
             try
@@ -296,7 +340,7 @@ namespace FxSsh.Services
 
         private void HandleCancelTcpIpForward(GlobalRequestMessage message)
         {
-            // RFC 4254 section 7.2 payload: string address; uint port.
+            // RFC 4254 section 7.1 payload: string address; uint port.
             string address;
             uint port;
             try

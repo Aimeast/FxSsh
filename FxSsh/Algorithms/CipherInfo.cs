@@ -4,8 +4,32 @@ using System.Security.Cryptography;
 
 namespace FxSsh.Algorithms
 {
+    /// <summary>
+    /// Represents a symmetric cipher configuration for the SSH binary packet
+    /// protocol (RFC 4253 section 6): the negotiated key size, block size and
+    /// IV length, together with a factory that builds a per-direction
+    /// <see cref="EncryptionAlgorithm"/> from the key-exchange-derived key
+    /// and IV.
+    /// </summary>
     public class CipherInfo
     {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="CipherInfo"/> class
+        /// around a <see cref="SymmetricAlgorithm"/> instance. The key size is
+        /// validated against the algorithm's legal key sizes, and the
+        /// <see cref="Cipher"/> factory is wired to create an
+        /// <see cref="EncryptionAlgorithm"/> operating in
+        /// <paramref name="mode"/> for each direction.
+        /// </summary>
+        /// <param name="algorithm">
+        /// The symmetric algorithm the cipher is built on. Its key size is
+        /// set to <paramref name="keySize"/>, and the configured instance
+        /// backs every transform the factory creates.
+        /// </param>
+        /// <param name="keySize">The key size, in bits; must be one of the legal key sizes of <paramref name="algorithm"/>.</param>
+        /// <param name="mode">The cipher mode the algorithm operates in.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="algorithm"/> is null.</exception>
+        /// <exception cref="ArgumentOutOfRangeException"><paramref name="keySize"/> is not legal for <paramref name="algorithm"/>.</exception>
         public CipherInfo(SymmetricAlgorithm algorithm, int keySize, CipherModeEx mode)
         {
             ArgumentNullException.ThrowIfNull(algorithm);
@@ -27,8 +51,9 @@ namespace FxSsh.Algorithms
         /// full 12-byte nonce material: the first 4 bytes are the fixed field
         /// and the last 8 bytes seed the invocation counter (per OpenSSL's
         /// EVP_CTRL_GCM_SET_IV_FIXED arg=-1 "copy the complete IV" semantics,
-        /// NOT a 4-byte fixed_iv alone). AES block size (16) is still used for
-        /// packet length / padding alignment, so BlockSize is reported as 16.
+        /// NOT a 4-byte fixed_iv alone). AES block size (16 bytes) is still
+        /// used for packet length / padding alignment, so BlockSize is
+        /// reported as 128 bits.
         /// </summary>
         public CipherInfo(int keySize)
         {
@@ -66,14 +91,22 @@ namespace FxSsh.Algorithms
             Cipher = (key, iv, isEncryption) => new EncryptionAlgorithm(createTransform(key), blockSizeBits >> 3);
         }
 
+        /// <summary>Gets the negotiated key size, in bits.</summary>
         public int KeySize { get; private set; }
 
         /// <summary>Block size in bits (used for padding alignment).</summary>
         public int BlockSize { get; private set; }
 
-        /// <summary>IV length in bytes for key-exchange IV derivation (4 for GCM).</summary>
+        /// <summary>IV length in bytes for key-exchange IV derivation (12 for GCM, the full nonce).</summary>
         public int IVSize { get; private set; }
 
+        /// <summary>
+        /// Gets the factory delegate that creates an
+        /// <see cref="EncryptionAlgorithm"/> for one direction of the packet
+        /// cipher. The arguments are the encryption/decryption key, the
+        /// initial vector, and a value indicating whether the transform
+        /// encrypts (true) or decrypts (false).
+        /// </summary>
         public Func<byte[], byte[], bool, EncryptionAlgorithm> Cipher { get; private set; }
     }
 }

@@ -42,6 +42,16 @@ namespace FxSsh.Algorithms
         {
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="HmacAlgorithm"/> class
+        /// that computes MACs with the supplied keyed hash algorithm. The
+        /// digest length is derived from the algorithm's hash size.
+        /// </summary>
+        /// <param name="algorithm">The keyed hash algorithm that performs the MAC computation, such as <see cref="HMACSHA256"/> or <see cref="HMACSHA512"/>.</param>
+        /// <param name="keySize">The MAC key size in bits; must equal the length of <paramref name="key"/> in bits.</param>
+        /// <param name="key">The MAC key derived by key exchange.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="algorithm"/> or <paramref name="key"/> is <c>null</c>.</exception>
+        /// <exception cref="ArgumentException"><paramref name="keySize"/> does not match the length of <paramref name="key"/> in bits.</exception>
         public HmacAlgorithm(KeyedHashAlgorithm algorithm, int keySize, byte[] key)
         {
             ArgumentNullException.ThrowIfNull(algorithm);
@@ -63,12 +73,17 @@ namespace FxSsh.Algorithms
                 : (byte)2;
         }
 
+        /// <summary>
+        /// Gets the length in bytes of the MAC written for each packet.
+        /// Subclasses implementing truncated MACs (e.g. umac-64@openssh.com)
+        /// override this to report the truncated length.
+        /// </summary>
         public virtual int DigestLength => _digestLength;
 
         /// <summary>
-        /// Compute MAC over <paramref name="input"/> only (b empty), returning a
-        /// fresh array. Kept for the cold key-exchange MAC path; hot paths
-        /// use the Span overload below.
+        /// Compute MAC over <paramref name="input"/> only (an empty second
+        /// segment), returning a fresh array. Kept for the cold key-exchange
+        /// MAC path; hot paths use the Span overload below.
         /// </summary>
         public byte[] ComputeHash(byte[] input)
         {

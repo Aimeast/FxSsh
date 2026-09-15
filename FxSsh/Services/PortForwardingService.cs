@@ -12,7 +12,7 @@ using FxSsh.Logging;
 namespace FxSsh.Services
 {
     /// <summary>
-    /// Server-side reverse port forwarding (RFC 4254 section 7.2).
+    /// Server-side reverse port forwarding (RFC 4254 section 7).
     ///
     /// Bound to a single (address, port) endpoint requested by the peer via
     /// SSH_MSG_GLOBAL_REQUEST "tcpip-forward". Each inbound TCP connection is
@@ -39,13 +39,15 @@ namespace FxSsh.Services
         /// <summary>Bound host the listener actually used (may differ from requested when host was empty).</summary>
         public string BoundAddress { get; }
 
-        /// <summary>Bound port the listener actually used ( RFC 4254: when requested port is 0, return the OS-assigned port).</summary>
+        /// <summary>Bound port the listener actually used (RFC 4254: when the requested port is 0, the OS-assigned port).</summary>
         public uint BoundPort { get; private set; }
 
         /// <summary>Raised (best-effort) when a forwarded channel is torn down because the peer closed it or the listener stopped.</summary>
         public event EventHandler<Channel> ForwardedChannelClosed;
 
         /// <summary>
+        /// Initializes a new instance of the <see cref="PortForwardingService"/> class
+        /// for one reverse-forwarded (address, port) endpoint.
         /// </summary>
         /// <param name="address">Bind address as requested by the peer. Empty/null selects IPv4Any.</param>
         /// <param name="port">Bind port. 0 lets the OS choose; the chosen port is exposed via BoundPort.</param>
@@ -68,6 +70,11 @@ namespace FxSsh.Services
             _listener = new TcpListener(_endpoint);
         }
 
+        /// <summary>
+        /// Starts the TCP listener and its asynchronous accept loop. When the
+        /// requested port was 0, the OS-assigned port is published via
+        /// <see cref="BoundPort"/> so it can be reported back to the peer.
+        /// </summary>
         public void Start()
         {
             _listener.Start();
@@ -256,6 +263,11 @@ namespace FxSsh.Services
             }
         }
 
+        /// <summary>
+        /// Stops the listener and closes every bridged TCP socket. The SSH
+        /// side of each forwarded channel is left to be torn down by the peer
+        /// or by session teardown.
+        /// </summary>
         public void Dispose()
         {
             Log.Debug($"Forwarding listener {BoundAddress}:{BoundPort} stopping.");

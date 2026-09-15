@@ -22,6 +22,17 @@ namespace FxSsh.Services.Pty
         private FileStream reader;
         private readonly SemaphoreSlim _inputLock = new(1, 1);
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="ConPtyTerminal"/> class:
+        /// switches the host console output code page to UTF-8, creates the
+        /// input/output pipes and the pseudo console at the given size, and
+        /// starts <paramref name="command"/> attached to it via the
+        /// PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE attribute.
+        /// </summary>
+        /// <param name="command">Shell command line to run inside the pseudo console (e.g. "cmd.exe").</param>
+        /// <param name="windowWidth">Initial width of the pseudo console in character columns.</param>
+        /// <param name="windowHeight">Initial height of the pseudo console in character rows.</param>
+        /// <exception cref="InvalidOperationException">A pipe, the pseudo console, or the child process could not be created; the message carries the Win32 error code.</exception>
         public ConPtyTerminal(string command, int windowWidth, int windowHeight)
         {
             // The pseudo console outputs UTF-8 bytes; ensure the host console
@@ -36,7 +47,18 @@ namespace FxSsh.Services.Pty
             reader = new FileStream(outputPipe.ReadSide, FileAccess.Read);
         }
 
+        /// <summary>
+        /// Raised with shell output bytes read from the ConPTY output pipe.
+        /// The payload is a fresh copy per event (the read buffer is reused)
+        /// and should be forwarded to the SSH channel.
+        /// </summary>
         public event EventHandler<byte[]> DataReceived;
+
+        /// <summary>
+        /// Raised once when the shell process exits, carrying its exit code
+        /// for the SSH "exit-status" reply; a STILL_ACTIVE (259) artifact is
+        /// collapsed to 0.
+        /// </summary>
         public event EventHandler<uint> CloseReceived;
 
         /// <summary>
@@ -130,6 +152,11 @@ namespace FxSsh.Services.Pty
             }
         }
 
+        /// <summary>
+        /// Closes the console input stream and terminates the child shell
+        /// process (if still running) so it cannot outlive the SSH session
+        /// as an orphan.
+        /// </summary>
         public void OnClose()
         {
             try { writer.Dispose(); } catch { }
@@ -159,6 +186,10 @@ namespace FxSsh.Services.Pty
             }
         }
 
+        /// <summary>
+        /// Releases the console file streams, the child process (attribute
+        /// list and handles), the pseudo console, and its pipes.
+        /// </summary>
         public void Dispose()
         {
             DisposeResources(reader, writer, process, pseudoConsole, outputPipe, inputPipe);

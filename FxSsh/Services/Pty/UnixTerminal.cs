@@ -26,6 +26,20 @@ namespace FxSsh.Services.Pty
         private readonly SemaphoreSlim _inputLock = new(1, 1);
         private int _closed;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="UnixTerminal"/> class:
+        /// opens a pty master (posix_openpt / grantpt / unlockpt), resolves
+        /// the slave path with ptsname_r, configures the slave termios for an
+        /// interactive SSH session (applying the RFC 4254 section 8 modes),
+        /// sets the window size, and spawns the shell with the slave as its
+        /// controlling terminal.
+        /// </summary>
+        /// <param name="command">Shell command to run. When it contains no slash it is probed under /bin, /usr/bin and /usr/local/bin, falling back to /bin/sh.</param>
+        /// <param name="windowWidth">Initial width of the terminal in character columns.</param>
+        /// <param name="windowHeight">Initial height of the terminal in character rows.</param>
+        /// <param name="modes">RFC 4254 section 8 terminal modes byte string from the SSH pty-req request; may be null.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="command"/> is null.</exception>
+        /// <exception cref="InvalidOperationException">A pty allocation step or the shell spawn failed; the message names the failing call and its errno.</exception>
         public UnixTerminal(string command, int windowWidth, int windowHeight, byte[] modes)
         {
             ArgumentNullException.ThrowIfNull(command);
@@ -71,7 +85,19 @@ namespace FxSsh.Services.Pty
             }
         }
 
+        /// <summary>
+        /// Raised with shell output bytes read from the pty master, which the
+        /// SSH channel should forward to the client. Reading ends (and
+        /// <see cref="CloseReceived"/> fires) when the slave side hangs up
+        /// after the shell exits.
+        /// </summary>
         public event EventHandler<byte[]> DataReceived;
+
+        /// <summary>
+        /// Raised once the master read loop ends because the slave side hung
+        /// up, after the child has been reaped, carrying its exit code for
+        /// the SSH "exit-status" reply.
+        /// </summary>
         public event EventHandler<uint> CloseReceived;
 
         /// <summary>
@@ -151,6 +177,11 @@ namespace FxSsh.Services.Pty
             }
         }
 
+        /// <summary>
+        /// Sends SIGHUP to the child shell so the slave side hangs up and the
+        /// master read loop unblocks, then closes the master and slave file
+        /// descriptors. Idempotent; the first call wins.
+        /// </summary>
         public void OnClose()
         {
             // SIGHUP the child shell first so the slave side hangs up and the
@@ -174,6 +205,10 @@ namespace FxSsh.Services.Pty
             SetWindowSize(_masterFd, width, height);
         }
 
+        /// <summary>
+        /// Closes the terminal (see <see cref="OnClose"/>) and disposes the
+        /// input serialization lock.
+        /// </summary>
         public void Dispose()
         {
             OnClose();
@@ -305,7 +340,7 @@ namespace FxSsh.Services.Pty
         /// Start the shell as a session leader with the pty slave as its
         /// controlling terminal. Instead of forking in-process (unsafe in a
         /// multi-threaded .NET process), spawn `setsid /bin/sh -c "exec
-        /// {shell} <{slave} >{slave} 2>&1"`: the shell opens the slave itself
+        /// {shell} &lt;{slave} &gt;{slave} 2&gt;&amp;1"`: the shell opens the slave itself
         /// (no O_NOCTTY), which makes it the controlling terminal, then execs
         /// the requested command. The server keeps only the master.
         /// </summary>

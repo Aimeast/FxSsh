@@ -9,7 +9,7 @@ namespace FxSsh.Services.Sftp
     /// <summary>
     /// Default <see cref="ISftpFileSystem"/> backed by the local disk, rooted
     /// at a single directory (a chroot-style jail). All client paths are
-    /// resolved against <paramref name="rootPath"/> and are prevented from
+    /// resolved against the configured root directory and are prevented from
     /// escaping it (draft-ietf-secsh-filexfer-02, section 6.2).
     ///
     /// Errors surface as the corresponding .NET exceptions; the protocol
@@ -21,11 +21,22 @@ namespace FxSsh.Services.Sftp
         private readonly string _rootPath;
         private readonly bool _readOnly;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="LocalFileSystem"/> class that
+        /// serves files from beneath <paramref name="rootPath"/> in read-write mode.
+        /// </summary>
+        /// <param name="rootPath">Directory that becomes the visible SFTP root ("/").</param>
         public LocalFileSystem(string rootPath)
             : this(rootPath, readOnly: false)
         {
         }
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="LocalFileSystem"/> class that
+        /// serves files from beneath <paramref name="rootPath"/>.
+        /// </summary>
+        /// <param name="rootPath">Directory that becomes the visible SFTP root ("/").</param>
+        /// <param name="readOnly">True to make every mutating operation throw <see cref="UnauthorizedAccessException"/>.</param>
         public LocalFileSystem(string rootPath, bool readOnly)
         {
             ArgumentNullException.ThrowIfNull(rootPath);
@@ -64,6 +75,16 @@ namespace FxSsh.Services.Sftp
                 throw new UnauthorizedAccessException("SFTP server is read-only.");
         }
 
+        /// <summary>
+        /// Opens (or creates) the file at <paramref name="path"/> and returns a
+        /// positional handle over it. Maps to SSH_FXP_OPEN.
+        /// </summary>
+        /// <param name="path">Server-side path, resolved against the root.</param>
+        /// <param name="flags">Open mode flags (SSH_FXF_*); at least one of <see cref="SftpOpenFlags.Read"/> or <see cref="SftpOpenFlags.Write"/> must be set.</param>
+        /// <param name="attributes">Initial attributes for a created file; may be null.</param>
+        /// <returns>A handle for positional reads and writes on the file.</returns>
+        /// <exception cref="ArgumentException">No access flag was requested, or <see cref="SftpOpenFlags.Truncate"/> or <see cref="SftpOpenFlags.Exclusive"/> was set without <see cref="SftpOpenFlags.Create"/>.</exception>
+        /// <exception cref="UnauthorizedAccessException">The path escapes the root, the file system is read-only and a write-capable flag was set, or the OS denied access.</exception>
         public ISftpFileHandle OpenFile(string path, SftpOpenFlags flags, SftpFileAttributes attributes)
         {
             var absPath = GetAbsolutePath(path);
@@ -84,6 +105,14 @@ namespace FxSsh.Services.Sftp
             return new LocalFileHandle(fs, absPath, append, _readOnly);
         }
 
+        /// <summary>
+        /// Opens the directory at <paramref name="path"/> for listing. Maps to
+        /// SSH_FXP_OPENDIR.
+        /// </summary>
+        /// <param name="path">Server-side path, resolved against the root.</param>
+        /// <returns>A handle that streams the directory's entries in batches.</returns>
+        /// <exception cref="DirectoryNotFoundException">The path does not exist or is not a directory.</exception>
+        /// <exception cref="UnauthorizedAccessException">The path escapes the root or cannot be read.</exception>
         public ISftpDirectoryHandle OpenDirectory(string path)
         {
             var absPath = GetAbsolutePath(path);
@@ -95,6 +124,15 @@ namespace FxSsh.Services.Sftp
             return new LocalDirectoryHandle(absPath);
         }
 
+        /// <summary>
+        /// Retrieves the attributes of <paramref name="path"/>. Maps to SSH_FXP_STAT
+        /// when <paramref name="followLinks"/> is true, SSH_FXP_LSTAT otherwise.
+        /// </summary>
+        /// <param name="path">Server-side path, resolved against the root.</param>
+        /// <param name="followLinks">True to follow symbolic links; false to report a link itself.</param>
+        /// <returns>The file's attributes, or null when they cannot be read.</returns>
+        /// <exception cref="FileNotFoundException">The path does not exist.</exception>
+        /// <exception cref="UnauthorizedAccessException">The path escapes the root.</exception>
         public SftpFileAttributes GetAttributes(string path, bool followLinks)
         {
             var absPath = GetAbsolutePath(path);
@@ -112,6 +150,14 @@ namespace FxSsh.Services.Sftp
             return GetAttr(info);
         }
 
+        /// <summary>
+        /// Applies the times and size carried by <paramref name="attributes"/> to the
+        /// file at <paramref name="path"/>; a non-null size truncates or extends the
+        /// file. Maps to SSH_FXP_SETSTAT.
+        /// </summary>
+        /// <param name="path">Server-side path, resolved against the root.</param>
+        /// <param name="attributes">Attributes to apply; null fields are left unchanged.</param>
+        /// <exception cref="UnauthorizedAccessException">The path escapes the root or the file system is read-only.</exception>
         public void SetAttributes(string path, SftpFileAttributes attributes)
         {
             EnsureWritable();
@@ -120,6 +166,11 @@ namespace FxSsh.Services.Sftp
             ApplyAttr(info, attributes);
         }
 
+        /// <summary>
+        /// Deletes the file at <paramref name="path"/>. Maps to SSH_FXP_REMOVE.
+        /// </summary>
+        /// <param name="path">Server-side path, resolved against the root.</param>
+        /// <exception cref="UnauthorizedAccessException">The path is a directory, escapes the root, or the file system is read-only.</exception>
         public void RemoveFile(string path)
         {
             EnsureWritable();
@@ -129,6 +180,13 @@ namespace FxSsh.Services.Sftp
             File.Delete(absPath);
         }
 
+        /// <summary>
+        /// Moves the file or directory at <paramref name="oldPath"/> to
+        /// <paramref name="newPath"/>. Maps to SSH_FXP_RENAME.
+        /// </summary>
+        /// <param name="oldPath">Server-side source path, resolved against the root.</param>
+        /// <param name="newPath">Server-side destination path, resolved against the root.</param>
+        /// <exception cref="UnauthorizedAccessException">Either path escapes the root or the file system is read-only.</exception>
         public void Rename(string oldPath, string newPath)
         {
             EnsureWritable();
@@ -140,6 +198,14 @@ namespace FxSsh.Services.Sftp
                 File.Move(absOld, absNew);
         }
 
+        /// <summary>
+        /// Creates the directory at <paramref name="path"/>, optionally applying
+        /// <paramref name="attributes"/> to it. Maps to SSH_FXP_MKDIR.
+        /// </summary>
+        /// <param name="path">Server-side path, resolved against the root.</param>
+        /// <param name="attributes">Attributes to apply to the new directory; may be null.</param>
+        /// <exception cref="IOException">A file or directory already exists at the path.</exception>
+        /// <exception cref="UnauthorizedAccessException">The path escapes the root or the file system is read-only.</exception>
         public void MakeDirectory(string path, SftpFileAttributes attributes)
         {
             EnsureWritable();
@@ -151,6 +217,12 @@ namespace FxSsh.Services.Sftp
                 ApplyAttr(new DirectoryInfo(absPath), attributes);
         }
 
+        /// <summary>
+        /// Deletes the empty directory at <paramref name="path"/>. Maps to SSH_FXP_RMDIR.
+        /// </summary>
+        /// <param name="path">Server-side path, resolved against the root.</param>
+        /// <exception cref="DirectoryNotFoundException">The path does not exist.</exception>
+        /// <exception cref="UnauthorizedAccessException">The path escapes the root or the file system is read-only.</exception>
         public void RemoveDirectory(string path)
         {
             EnsureWritable();
@@ -160,6 +232,14 @@ namespace FxSsh.Services.Sftp
             Directory.Delete(absPath, false);
         }
 
+        /// <summary>
+        /// Resolves <paramref name="path"/> to its canonical absolute form inside the
+        /// jail, using '/' separators; the root itself canonicalizes to "/". Maps to
+        /// SSH_FXP_REALPATH.
+        /// </summary>
+        /// <param name="path">Server-side path; an empty path or "~" refers to the root.</param>
+        /// <returns>The canonical absolute path.</returns>
+        /// <exception cref="UnauthorizedAccessException">The path escapes the root.</exception>
         public string RealPath(string path)
         {
             // Canonical absolute form: resolve against the root, then expose

@@ -4,6 +4,11 @@ using System.Security.Cryptography;
 
 namespace FxSsh.Algorithms
 {
+    /// <summary>
+    /// Provides encryption and decryption for one negotiated SSH session cipher
+    /// direction: CBC and CTR run through a streaming transform, while GCM (and
+    /// plugin ciphers) are exposed as per-packet AEAD operations.
+    /// </summary>
     public class EncryptionAlgorithm
     {
         private readonly SymmetricAlgorithm _algorithm;
@@ -18,6 +23,20 @@ namespace FxSsh.Algorithms
         private readonly IAeadTransform _aeadTransform;
         private readonly int _blockBytesSize;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="EncryptionAlgorithm"/> class,
+        /// creating the encryptor or decryptor for the requested cipher mode: CBC
+        /// uses the algorithm's own encryptor/decryptor, CTR wraps it in a
+        /// <see cref="CtrModeCryptoTransform"/>, and GCM builds a
+        /// <see cref="GcmModeCryptoTransform"/> as the AEAD transform.
+        /// </summary>
+        /// <param name="algorithm">The symmetric algorithm seeded with the key and IV for CBC/CTR; unused (may be null) for GCM, which owns its key via AesGcm.</param>
+        /// <param name="keySize">The key size in bits; must equal the length of <paramref name="key"/> in bits.</param>
+        /// <param name="mode">The cipher mode to configure.</param>
+        /// <param name="key">The key material.</param>
+        /// <param name="iv">The initialization vector (12 bytes for GCM).</param>
+        /// <param name="isEncryption">Whether to create an encryptor (true) or a decryptor (false).</param>
+        /// <exception cref="ArgumentException">The key size does not match the length of <paramref name="key"/>, or the GCM IV is not 12 bytes.</exception>
         public EncryptionAlgorithm(SymmetricAlgorithm algorithm, int keySize, CipherModeEx mode, byte[] key, byte[] iv, bool isEncryption)
         {
             ArgumentNullException.ThrowIfNull(key);

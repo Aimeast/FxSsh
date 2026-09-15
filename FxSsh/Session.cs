@@ -21,12 +21,18 @@ using FxSsh.Services;
 
 namespace FxSsh
 {
+    /// <summary>
+    /// Represents a single SSH connection accepted by an <see cref="SshServer"/>,
+    /// running the transport layer (version exchange, key exchange, and the
+    /// binary packet protocol per RFC 4253) and hosting the services
+    /// (ssh-userauth, ssh-connection) negotiated over it.
+    /// </summary>
     public class Session
     {
         private const byte CarriageReturn = 0x0d;
         private const byte LineFeed = 0x0a;
         internal const int MaximumSshPacketSize = LocalChannelDataPacketSize;
-        // Advertised receive window (RFC 4254 section 5.3). 2 MiB matches the
+        // Advertised receive window (RFC 4254 section 5.2). 2 MiB matches the
         // OpenSSH default and halves the WINDOW_ADJUST round-trips of the old
         // 1 MiB window (64 vs 32 packets between refreshes), which matters for
         // single-connection throughput and high-concurrency message-loop churn.
@@ -91,12 +97,45 @@ namespace FxSsh
         private bool _discardNextKexPacket;
 
         private static long _nextId = 0;
+
+        /// <summary>
+        /// Gets the unique identifier of this session, assigned when the
+        /// session is constructed. Values increase monotonically per process.
+        /// </summary>
         public long Id { get; }
+
+        /// <summary>
+        /// Gets a thread-safe store that applications and services can use to
+        /// attach arbitrary per-session state, keyed by type.
+        /// </summary>
         public ConcurrentDictionary<Type, object> ContextData { get; } = new();
 
+        /// <summary>
+        /// Gets the server protocol version banner (e.g. "SSH-2.0-FxSsh") sent
+        /// to the client during the version exchange.
+        /// </summary>
         public string ServerVersion { get; private set; }
+
+        /// <summary>
+        /// Gets the client protocol version string (e.g. "SSH-2.0-OpenSSH_9.6")
+        /// received during the version exchange; populated once
+        /// <see cref="StartAsync(CancellationToken)"/> has run the handshake.
+        /// </summary>
         public string ClientVersion { get; private set; }
+
+        /// <summary>
+        /// Gets the session identifier: the exchange hash computed by the
+        /// first key exchange (RFC 4253 section 7.2). Null until the first key
+        /// exchange completes; it never changes across subsequent rekeys.
+        /// </summary>
         public byte[] SessionId { get; private set; }
+
+        /// <summary>
+        /// Gets the registered service instance of type
+        /// <typeparamref name="T"/>, or null when no such service has been
+        /// registered for this session yet.
+        /// </summary>
+        /// <typeparam name="T">The service type to look up.</typeparam>
         public T GetService<T>() where T : SshService
         {
             return (T)_services.FirstOrDefault(x => x is T);
@@ -141,10 +180,26 @@ namespace FxSsh
             RegisterExtension("server-sig-algs", string.Join(",", _publicKeyAlgorithms.Keys));
         }
 
+        /// <summary>
+        /// Occurs when the session has been disconnected and its socket
+        /// closed, whether by application request, protocol error, or peer
+        /// disconnect.
+        /// </summary>
         public event EventHandler<EventArgs> Disconnected;
 
+        /// <summary>
+        /// Occurs when an SSH service (for example ssh-userauth or
+        /// ssh-connection) is registered for this session in response to a
+        /// service request from the client.
+        /// </summary>
         public event EventHandler<SshService> ServiceRegistered;
 
+        /// <summary>
+        /// Occurs when the client's SSH_MSG_KEXINIT is received. The event
+        /// arguments expose the algorithm name-lists the client advertised,
+        /// for inspection or logging; negotiation itself is performed by the
+        /// library.
+        /// </summary>
         public event EventHandler<KeyExchangeArgs> KeysExchanged;
 
         /// <summary>
@@ -181,6 +236,19 @@ namespace FxSsh
             }
         }
 
+        /// <summary>
+        /// Disconnects the session: cancels the protocol pumps, shuts the
+        /// socket down, and raises <see cref="Disconnected"/>. The first call
+        /// performs the teardown; subsequent calls are ignored.
+        /// </summary>
+        /// <param name="reason">The disconnect reason code reported to the peer.</param>
+        /// <param name="description">A human-readable disconnect description.</param>
+        /// <remarks>
+        /// When <paramref name="reason"/> is
+        /// <see cref="DisconnectReason.ByApplication"/>, an SSH_MSG_DISCONNECT
+        /// message carrying <paramref name="description"/> is sent to the peer
+        /// before the socket is shut down.
+        /// </remarks>
         public async Task DisconnectAsync(DisconnectReason reason = DisconnectReason.ByApplication, string description = "Connection terminated by the server.")
         {
             bool runTeardown;
@@ -230,6 +298,14 @@ namespace FxSsh
             Disconnected?.Invoke(this, EventArgs.Empty);
         }
 
+        /// <summary>
+        /// Disconnects the session without waiting for the teardown to
+        /// complete. See
+        /// <see cref="DisconnectAsync(DisconnectReason, string)"/> for the
+        /// semantics of the parameters.
+        /// </summary>
+        /// <param name="reason">The disconnect reason code reported to the peer.</param>
+        /// <param name="description">A human-readable disconnect description.</param>
         public void Disconnect(DisconnectReason reason = DisconnectReason.ByApplication, string description = "Connection terminated by the server.")
         {
             _ = DisconnectAsync(reason, description);
@@ -370,11 +446,12 @@ namespace FxSsh
         }
 
         /// <summary>
-        /// A pooled byte buffer rented from <see cref="ArrayPool{byte}.Shared"/>
-        /// that flows between the async pumps. Unlike the old ref struct
-        /// (which could only live on the stack), this one is stored inside
-        /// <see cref="_sendChannel"/> and <see cref="Pipe"/>-backed reads, so
-        /// it must be a plain struct. Dispose returns the rental to the pool.
+        /// A pooled byte buffer rented from the dedicated SSH packet pool
+        /// (<see cref="SshBuffers.Packets"/>) that flows between the async
+        /// pumps. Unlike the old ref struct (which could only live on the
+        /// stack), this one is stored inside <see cref="_sendChannel"/> and
+        /// <see cref="Pipe"/>-backed reads, so it must be a plain struct.
+        /// Dispose returns the rental to the pool.
         /// </summary>
         private struct PooledBuffer : IDisposable
         {
@@ -547,7 +624,7 @@ namespace FxSsh
                 }
             }
 
-            // OpenSSH Encrypt-then-MAC (RFC 6668): packet_length is NOT encrypted.
+            // OpenSSH Encrypt-then-MAC (draft-miller-secsh-etm): packet_length is NOT encrypted.
             // Layout: [length(4, plaintext)][encrypt(padding_length||payload||padding)][MAC].
             if (isEtm)
             {
@@ -756,7 +833,7 @@ namespace FxSsh
             // is a multiple of the cipher block size or 8,
             // padding length must between 4 and 255 bytes.
             //
-            // OpenSSH ETM (RFC 6668) and AEAD (RFC 5647) both transmit
+            // OpenSSH EtM (draft-miller-secsh-etm) and AEAD (RFC 5647) both transmit
             // packet_length in plaintext and the peer validates it immediately,
             // so the padding must make packet_length itself a multiple of the
             // block size (packet_length = payload.Length + padding + 1).
@@ -830,7 +907,7 @@ namespace FxSsh
                     }
                     else if (_algorithms.ServerHmacIsEtm)
                     {
-                        // OpenSSH Encrypt-then-MAC (RFC 6668): packet_length is NOT
+                        // OpenSSH Encrypt-then-MAC (draft-miller-secsh-etm): packet_length is NOT
                         // encrypted. Layout: [length(4, plaintext)][encrypt(padding_length||payload||padding)][MAC].
                         // MAC covers seq || length || ciphertext.
                         // Encrypt the body in place inside the scratch buffer
@@ -1266,10 +1343,10 @@ namespace FxSsh
         /// Enable or update server-side keepalive probing. After the session
         /// has been idle (no inbound or outbound traffic) for <paramref name="idle"/>,
         /// the server sends a keepalive@openssh.com global request every
-        /// <paramref name="idle"/> interval. If the peer fails to answer
-        /// MaxMissedProbes consecutive probes the session is torn down.
-        /// Pass a non-positive value to disable probing. Calling this before
-        /// the session is established is allowed; the timer starts immediately.
+        /// <paramref name="idle"/> interval. Once three consecutive probes
+        /// have gone unanswered the session is torn down. Pass a non-positive
+        /// value to disable probing. Calling this before the session is
+        /// established is allowed; the idle clock starts immediately.
         /// </summary>
         public void ConfigureKeepalive(TimeSpan idle)
         {
@@ -1414,9 +1491,9 @@ namespace FxSsh
         private Algorithms ComputeEncryption(KexAlgorithm kexAlg, PublicKeyAlgorithm hostKeyAlg, byte[] exchangeHash, CipherInfo clientCipher, CipherInfo serverCipher, HmacInfo clientHmac, HmacInfo serverHmac, byte[] sharedSecret)
         {
             // IV length is algorithm-specific: AES-CBC/CTR use a full block (16
-            // bytes), AES-GCM uses the 4-byte fixed_iv (RFC 5647 section 7.1). The
-            // remaining 8 bytes of the GCM nonce are a per-packet counter owned
-            // by GcmModeCryptoTransform.
+            // bytes), AES-GCM the full 12-byte nonce (4-byte fixed field plus
+            // the 8-byte invocation-counter seed, RFC 5647 section 7.1), whose
+            // counter half is advanced per packet by GcmModeCryptoTransform.
             var clientCipherIV = ComputeEncryptionKey(kexAlg, exchangeHash, clientCipher.IVSize, sharedSecret, 'A');
             var serverCipherIV = ComputeEncryptionKey(kexAlg, exchangeHash, serverCipher.IVSize, sharedSecret, 'B');
             var clientCipherKey = ComputeEncryptionKey(kexAlg, exchangeHash, clientCipher.KeySize >> 3, sharedSecret, 'C');

@@ -16,11 +16,17 @@ namespace FxSsh.Services.Sftp
         private const uint AttrAcmodeTime = 0x00000008;
         private const uint AttrExtended = 0x80000000;
 
+        /// <summary>Gets or sets the file size in bytes; when applied through SETSTAT/FSETSTAT, a non-null value truncates or extends the file.</summary>
         public ulong? Size { get; set; }
+        /// <summary>Gets or sets the numeric user ID (uid) of the file's owner.</summary>
         public uint? UserId { get; set; }
+        /// <summary>Gets or sets the numeric group ID (gid) of the file's owning group.</summary>
         public uint? GroupId { get; set; }
+        /// <summary>Gets or sets the POSIX permission bits, with the file type in the high bits (0x4000 directory, 0x8000 regular file, 0xA000 symbolic link) and the low nine bits holding the rwxrwxrwx mode.</summary>
         public uint? Permissions { get; set; }
+        /// <summary>Gets or sets the last access time as seconds since the Unix epoch.</summary>
         public uint? AccessTime { get; set; }
+        /// <summary>Gets or sets the last modification time as seconds since the Unix epoch.</summary>
         public uint? ModificationTime { get; set; }
 
         /// <summary>Vendor-specific attribute pairs ("name@domain", data).</summary>

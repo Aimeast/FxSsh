@@ -1,9 +1,20 @@
 ﻿
 namespace FxSsh.Algorithms
 {
+    /// <summary>
+    /// Specifies the block cipher mode an SSH encryption algorithm operates in.
+    /// </summary>
     public enum CipherModeEx
     {
+        /// <summary>
+        /// Cipher Block Chaining mode, the SSH equivalent of
+        /// <see cref="System.Security.Cryptography.CipherMode.CBC"/>.
+        /// </summary>
         CBC,
+
+        /// <summary>
+        /// Counter mode, as specified for SSH by RFC 4344.
+        /// </summary>
         CTR,
 
         /// <summary>

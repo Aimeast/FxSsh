@@ -17,12 +17,21 @@ namespace FxSsh.Algorithms
 
         private readonly X25519DiffieHellman _x25519;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="X25519Kex"/> class,
+        /// generating an X25519 key pair and selecting SHA-256.
+        /// </summary>
         public X25519Kex()
         {
             _x25519 = X25519DiffieHellman.GenerateKey();
             _hashAlgorithm = SHA256.Create();
         }
 
+        /// <summary>
+        /// Exports the server's 32-byte X25519 public key Q_S (the u-coordinate),
+        /// without the 0x04 point prefix used by NIST-curve ECDH (RFC 8731 section 2).
+        /// </summary>
+        /// <returns>The raw 32-byte X25519 public key, not SSH-framed.</returns>
         public override byte[] CreateKeyExchange()
         {
             // RFC 8731 section 2: Q_S is the 32-byte X25519 u-coordinate sent as an
@@ -30,6 +39,13 @@ namespace FxSsh.Algorithms
             return _x25519.ExportPublicKey();
         }
 
+        /// <summary>
+        /// Derives the X25519 shared secret from the client's public key Q_C.
+        /// </summary>
+        /// <param name="exchangeData">The client's 32-byte X25519 public key.</param>
+        /// <returns>The shared secret as a big-endian two's-complement byte array, not SSH-framed.</returns>
+        /// <exception cref="InvalidDataException"><paramref name="exchangeData"/> is not 32 bytes long.</exception>
+        /// <exception cref="CryptographicException">The derived shared secret is all zeros, i.e. the client sent a low-order point (RFC 7748 section 6.1).</exception>
         public override byte[] DecryptKeyExchange(byte[] exchangeData)
         {
             ArgumentNullException.ThrowIfNull(exchangeData);

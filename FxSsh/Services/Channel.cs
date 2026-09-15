@@ -6,8 +6,20 @@ using FxSsh.Messages.Connection;
 
 namespace FxSsh.Services
 {
+    /// <summary>
+    /// Base class for an SSH channel (RFC 4254 section 5): a flow-controlled,
+    /// multiplexed data stream carried over a single SSH connection. Tracks
+    /// the receive window and maximum packet size negotiated in each
+    /// direction, enforces flow control on outbound data, and implements the
+    /// channel lifecycle (open, EOF, close) for both sides. Concrete channel
+    /// types such as <see cref="SessionChannel"/> derive from this class.
+    /// </summary>
     public abstract class Channel
     {
+        /// <summary>
+        /// The connection service that owns this channel; used to send channel
+        /// messages and to unregister the channel when it closes.
+        /// </summary>
         protected ConnectionService _connectionService;
         private readonly object _windowLocker = new object();
         private bool _forceClosed;
@@ -24,6 +36,18 @@ namespace FxSsh.Services
         // no TCS per WINDOW_ADJUST at all.
         private int _windowWaiters;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="Channel"/> class for a
+        /// client-initiated channel open, recording the receive window and
+        /// maximum packet size the peer advertised (RFC 4254 section 5.1) and
+        /// assigning this server's side the session's default local window and
+        /// packet size.
+        /// </summary>
+        /// <param name="connectionService">The connection service that owns this channel.</param>
+        /// <param name="clientChannelId">The channel identifier assigned by the client.</param>
+        /// <param name="clientInitialWindowSize">The peer's initial receive window in bytes.</param>
+        /// <param name="clientMaxPacketSize">The maximum packet size the peer accepts, in bytes.</param>
+        /// <param name="serverChannelId">The channel identifier assigned by this server.</param>
         public Channel(ConnectionService connectionService,
             uint clientChannelId, uint clientInitialWindowSize, uint clientMaxPacketSize,
             uint serverChannelId)
@@ -81,14 +105,22 @@ namespace FxSsh.Services
             }
         }
 
+        /// <summary>Gets the channel identifier the client assigned to this channel (the peer's sender channel).</summary>
         public uint ClientChannelId { get; private set; }
+        /// <summary>Gets the initial receive window the peer advertised at channel open, in bytes.</summary>
         public uint ClientInitialWindowSize { get; private set; }
+        /// <summary>Gets the peer's remaining receive window in bytes; decremented by <see cref="SendData"/> and replenished when the peer sends SSH_MSG_CHANNEL_WINDOW_ADJUST.</summary>
         public uint ClientWindowSize { get; protected set; }
+        /// <summary>Gets the maximum channel data packet size the peer accepts, in bytes.</summary>
         public uint ClientMaxPacketSize { get; private set; }
 
+        /// <summary>Gets the channel identifier this server assigned to the channel (our sender channel).</summary>
         public uint ServerChannelId { get; private set; }
+        /// <summary>Gets the initial local receive window advertised to the peer at channel open, in bytes.</summary>
         public uint ServerInitialWindowSize { get; private set; }
+        /// <summary>Gets this side's remaining receive window in bytes, topped back up toward <see cref="ServerInitialWindowSize"/> by sending SSH_MSG_CHANNEL_WINDOW_ADJUST (RFC 4254 section 5.2).</summary>
         public uint ServerWindowSize { get; protected set; }
+        /// <summary>Gets the maximum channel data packet size this server accepts, in bytes.</summary>
         public uint ServerMaxPacketSize { get; private set; }
 
         /// <summary>True for a server-initiated channel awaiting OPEN_CONFIRMATION.</summary>
@@ -96,21 +128,44 @@ namespace FxSsh.Services
 
         /// <summary>Window advertised by the peer once OPEN_CONFIRMATION arrives; 0 until then.</summary>
         public uint PeerInitialWindowSize { get; private set; }
+        /// <summary>Maximum packet size the peer accepts once OPEN_CONFIRMATION arrives; 0 until then.</summary>
         public uint PeerMaximumPacketSize { get; private set; }
 
         /// <summary>Queued outbound bytes produced before OPEN_CONFIRMATION arrives.</summary>
         private readonly System.Collections.Generic.List<ReadOnlyMemory<byte>> _pendingSends = [];
 
+        /// <summary>Gets a value indicating whether the peer has sent SSH_MSG_CHANNEL_CLOSE.</summary>
         public bool ClientClosed { get; private set; }
+        /// <summary>Gets a value indicating whether the peer has sent SSH_MSG_CHANNEL_EOF, meaning no more inbound data will arrive.</summary>
         public bool ClientMarkedEof { get; private set; }
+        /// <summary>Gets a value indicating whether this server has sent SSH_MSG_CHANNEL_CLOSE.</summary>
         public bool ServerClosed { get; private set; }
+        /// <summary>Gets a value indicating whether this server has sent SSH_MSG_CHANNEL_EOF.</summary>
         public bool ServerMarkedEof { get; private set; }
 
+        /// <summary>Occurs when channel data arrives from the peer (SSH_MSG_CHANNEL_DATA, RFC 4254 section 5.2).</summary>
         public event EventHandler<ReadOnlyMemory<byte>> DataReceived;
+        /// <summary>Occurs when the peer marks its side of the stream closed with SSH_MSG_CHANNEL_EOF.</summary>
         public event EventHandler EofReceived;
+        /// <summary>Occurs when the peer closes the channel with SSH_MSG_CHANNEL_CLOSE; the channel is torn down once both sides have closed.</summary>
         public event EventHandler CloseReceived;
+        /// <summary>Occurs when the peer resizes the terminal with a "window-change" channel request (RFC 4254 section 6.7).</summary>
         public event EventHandler<WindowChangeArgs> WindowChange;
 
+        /// <summary>
+        /// Sends the supplied bytes to the peer as SSH_MSG_CHANNEL_DATA
+        /// (RFC 4254 section 5.2), splitting them into chunks that respect
+        /// both the peer's remaining flow-control window and its maximum
+        /// packet size. Blocks while the peer's window is exhausted until a
+        /// SSH_MSG_CHANNEL_WINDOW_ADJUST arrives; throws
+        /// <see cref="ObjectDisposedException"/> if the channel is force-closed
+        /// while blocked.
+        /// </summary>
+        /// <param name="data">
+        /// The payload to send. The buffer is not copied; on a channel still
+        /// awaiting OPEN_CONFIRMATION the bytes are queued, so the caller must
+        /// keep the underlying buffer valid.
+        /// </param>
         public void SendData(ReadOnlyMemory<byte> data)
         {
             if (data.Length == 0)
@@ -279,6 +334,11 @@ namespace FxSsh.Services
             }
         }
 
+        /// <summary>
+        /// Sends SSH_MSG_CHANNEL_EOF (RFC 4254 section 5.3) to tell the peer
+        /// that no more data will be written to this channel. Has no effect
+        /// once this server has already marked EOF.
+        /// </summary>
         public void SendEof()
         {
             if (ServerMarkedEof)
@@ -289,6 +349,13 @@ namespace FxSsh.Services
             _connectionService._session.SendMessage(msg);
         }
 
+        /// <summary>
+        /// Closes the channel by sending SSH_MSG_CHANNEL_CLOSE (RFC 4254
+        /// section 5.3), optionally preceded by an "exit-status" channel
+        /// request reporting the command's exit code (RFC 4254 section 6.10).
+        /// Has no effect once this server has already closed the channel.
+        /// </summary>
+        /// <param name="exitCode">Optional exit code to report as "exit-status" before the close.</param>
         public void SendClose(uint? exitCode = null)
         {
             if (ServerClosed)
@@ -304,7 +371,7 @@ namespace FxSsh.Services
 
         /// <summary>
         /// Close the channel after the process was terminated by a signal,
-        /// emitting an "exit-signal" channel request (RFC 4254 section 10.2) before
+        /// emitting an "exit-signal" channel request (RFC 4254 section 6.10) before
         /// SSH_MSG_CHANNEL_CLOSE. Mutually exclusive with SendClose(exitCode):
         /// a channel reports EITHER exit-status OR exit-signal, never both.
         /// </summary>
@@ -397,7 +464,7 @@ namespace FxSsh.Services
         {
             ServerWindowSize -= messageLength;
 
-            // RFC 4254 section 5.3: the local window advertised to the peer is topped
+            // RFC 4254 section 5.2: the local window advertised to the peer is topped
             // up by sending SSH_MSG_CHANNEL_WINDOW_ADJUST before the peer's send
             // window would otherwise stall. The exact refresh point is an
             // implementation choice; the only hard constraint is that the peer

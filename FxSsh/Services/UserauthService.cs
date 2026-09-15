@@ -5,19 +5,50 @@ using FxSsh.Messages.UserAuth;
 
 namespace FxSsh.Services
 {
+    /// <summary>
+    /// Implements the "ssh-userauth" service (RFC 4252): validates "password",
+    /// "publickey" and optionally "none" authentication requests by delegating
+    /// the accept/reject decision to the <see cref="UserAuth"/> event, and
+    /// registers the service the client asked to start (usually
+    /// "ssh-connection") once authentication succeeds.
+    /// </summary>
     public class UserAuthService : SshService
     {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="UserAuthService"/> class.
+        /// </summary>
+        /// <param name="session">The session that instantiated the service for SSH_MSG_SERVICE_REQUEST "ssh-userauth".</param>
         public UserAuthService(Session session)
             : base(session)
         {
         }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether the "none" authentication
+        /// method (RFC 4252 section 5) is accepted. Disabled by default;
+        /// when enabled, the <see cref="UserAuth"/> handler still decides
+        /// whether the request succeeds.
+        /// </summary>
         public bool EnableNoneAuth { get; set; } = false;
 
+        /// <summary>
+        /// Raised for every authentication attempt with the credentials the
+        /// client presented ("password", "publickey" or "none"). The handler
+        /// must set <see cref="UserAuthArgs.Result"/> to true to accept; with
+        /// no handler subscribed, every attempt is rejected.
+        /// </summary>
         public event EventHandler<UserAuthArgs> UserAuth;
 
+        /// <summary>
+        /// Occurs after authentication succeeds, carrying the service name the
+        /// client asked to start (usually "ssh-connection").
+        /// </summary>
         public event EventHandler<string> Succeed;
 
+        /// <summary>
+        /// Implements the base teardown hook; the user authentication service
+        /// holds no resources, so this is a no-op.
+        /// </summary>
         protected internal override void CloseService()
         {
         }

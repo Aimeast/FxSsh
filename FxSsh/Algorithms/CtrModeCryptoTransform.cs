@@ -5,6 +5,12 @@ using System.Security.Cryptography;
 
 namespace FxSsh.Algorithms
 {
+    /// <summary>
+    /// Counter (CTR) mode transform per RFC 4344: the keystream is built by
+    /// concatenating counter blocks (the IV, incremented as a big-endian integer
+    /// for each successive block), ECB-encrypting the concatenated blocks with
+    /// the underlying cipher, and XORing the result with the plaintext.
+    /// </summary>
     public class CtrModeCryptoTransform : ICryptoTransform
     {
         private readonly SymmetricAlgorithm _algorithm;
@@ -22,6 +28,12 @@ namespace FxSsh.Algorithms
         private readonly byte[] _ks;
 
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="CtrModeCryptoTransform"/> class,
+        /// reconfiguring the algorithm to ECB mode with no padding so it encrypts the
+        /// raw counter blocks.
+        /// </summary>
+        /// <param name="algorithm">The symmetric algorithm (e.g. AES) used to encrypt the counter blocks.</param>
         public CtrModeCryptoTransform(SymmetricAlgorithm algorithm)
         {
             ArgumentNullException.ThrowIfNull(algorithm);
@@ -36,26 +48,40 @@ namespace FxSsh.Algorithms
             _ks = new byte[1 << 16];
         }
 
+        /// <summary>Gets a value indicating whether the transform can be reused (always true; the CTR state is carried entirely in the counter).</summary>
         public bool CanReuseTransform
         {
             get { return true; }
         }
 
+        /// <summary>Gets a value indicating whether multiple blocks can be transformed in one call (always true).</summary>
         public bool CanTransformMultipleBlocks
         {
             get { return true; }
         }
 
+        /// <summary>Gets the input block size in bits.</summary>
         public int InputBlockSize
         {
             get { return _algorithm.BlockSize; }
         }
 
+        /// <summary>Gets the output block size in bits.</summary>
         public int OutputBlockSize
         {
             get { return _algorithm.BlockSize; }
         }
 
+        /// <summary>
+        /// XORs the specified region of the input buffer with the CTR keystream,
+        /// advancing the counter so consecutive calls continue the same keystream.
+        /// </summary>
+        /// <param name="inputBuffer">The buffer containing the data to transform.</param>
+        /// <param name="inputOffset">The offset into the input buffer at which to begin.</param>
+        /// <param name="inputCount">The number of bytes to transform; the final block may be partial.</param>
+        /// <param name="outputBuffer">The buffer to write the transformed data to.</param>
+        /// <param name="outputOffset">The offset into the output buffer at which to begin writing.</param>
+        /// <returns>The number of bytes processed, rounded up to whole cipher blocks.</returns>
         public int TransformBlock(byte[] inputBuffer, int inputOffset, int inputCount, byte[] outputBuffer, int outputOffset)
         {
             var bytesPerBlock = InputBlockSize >> 3;
@@ -128,6 +154,14 @@ namespace FxSsh.Algorithms
             return written;
         }
 
+        /// <summary>
+        /// Transforms the final block of data. CTR applies no padding, so the
+        /// output is simply the input XORed with the keystream.
+        /// </summary>
+        /// <param name="inputBuffer">The buffer containing the data to transform.</param>
+        /// <param name="inputOffset">The offset into the input buffer at which to begin.</param>
+        /// <param name="inputCount">The number of bytes to transform.</param>
+        /// <returns>The transformed input; its length equals <paramref name="inputCount"/>.</returns>
         public byte[] TransformFinalBlock(byte[] inputBuffer, int inputOffset, int inputCount)
         {
             var output = new byte[inputCount];
@@ -135,6 +169,7 @@ namespace FxSsh.Algorithms
             return output;
         }
 
+        /// <summary>Releases the resources used by the current transform, including the underlying ECB encryptor.</summary>
         public void Dispose()
         {
             _transform.Dispose();
