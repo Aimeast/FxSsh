@@ -194,6 +194,8 @@ namespace FxSsh.Services
                     catch (ObjectDisposedException) { break; }
 
                     if (n <= 0) break;
+                    if (Log.IsEnabled(LogLevel.Trace))
+                        Log.Trace($"Forwarding {n} bytes socket -> channel {channel.ServerChannelId}.");
                     await channel.SendDataAsync(n == buf.Length ? buf : buf[..n]);
                 }
             }

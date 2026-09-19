@@ -399,6 +399,8 @@ namespace FxSsh.Services
             var serverChannelId = (uint)Interlocked.Increment(ref _serverChannelCounter);
 
             var channel = new PendingForwardedChannel(this, serverChannelId);
+            if (Log.IsEnabled(LogLevel.Trace))
+                Log.Trace($"Forwarded channel {serverChannelId} opened to peer, awaiting confirmation.");
             lock (_locker)
                 _channels[serverChannelId] = channel;
 
@@ -424,6 +426,9 @@ namespace FxSsh.Services
             Channel channel;
             lock (_locker)
                 _channels.TryGetValue(message.RecipientChannel, out channel);
+
+            if (Log.IsEnabled(LogLevel.Trace))
+                Log.Trace($"Channel open confirmation: rchan={message.RecipientChannel} sender={message.SenderChannel} found={(channel != null)} pending={channel is PendingForwardedChannel} hash={channel?.GetHashCode()}.");
 
             if (channel is PendingForwardedChannel pending)
             {
@@ -468,8 +473,12 @@ namespace FxSsh.Services
         /// <summary>Server-initiated forwarded-tcpip channel awaiting confirmation.</summary>
         private sealed class PendingForwardedChannel : Channel
         {
+            // The 2-parameter protected ctor marks the channel as pending
+            // (buffering outbound data until OPEN_CONFIRMATION resolves the
+            // peer window); the 5-parameter public ctor would leave the peer
+            // window at zero and stall every send forever.
             public PendingForwardedChannel(ConnectionService svc, uint serverChannelId)
-                : base(svc, 0, 0, 0, serverChannelId) { }
+                : base(svc, serverChannelId) { }
         }
 
         private void HandleMessage(DirectTcpIpMessage message)

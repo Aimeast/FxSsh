@@ -20,4 +20,8 @@
     <Copyright>Copyright (c) Aimeast 2015-$([System.DateTime]::Now.Year)</Copyright>
   </PropertyGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="FxSsh.Tests" Key="0024000004800000940000000602000000240000525341310004000001000100259ce547d3f0a18803dd5d99085a2c56e21a75a91346f022709275f85ef35050a15086f4012018fbc0817b4b6c2f5ed4386d1aecc4ecb02cb48eb45c8baf266ffcdf1c615bdd225044bba092cb2d41b6b89bbe904d89dd8105f2e1f447056d99215e874d0dbbb3d6d9d8c212a238e9793dfa3e68ec8a07e40ec2c2ab7c3d8fe5" />
+  </ItemGroup>
+
 </Project>

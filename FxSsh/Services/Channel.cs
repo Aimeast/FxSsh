@@ -85,23 +85,51 @@ namespace FxSsh.Services
         internal void OnConfirmed(uint clientChannelId,
             uint peerInitialWindowSize, uint peerMaximumPacketSize)
         {
+            if (Log.IsEnabled(LogLevel.Trace))
+                Log.Trace($"Channel {ServerChannelId} open confirmed: peer window {peerInitialWindowSize}, max packet {peerMaximumPacketSize}.");
             if (!PendingConfirmation)
                 return;
-            PendingConfirmation = false;
 
+            // Publish the resolved peer window/ids BEFORE clearing the pending
+            // flag: a concurrent SendData* must either observe the pending flag
+            // (and queue its bytes) or observe the real window - never a
+            // cleared flag with the constructor's zero window, which would
+            // park the sender on the window condition forever.
             ClientChannelId = clientChannelId;
             ClientInitialWindowSize = peerInitialWindowSize;
-            ClientWindowSize = peerInitialWindowSize;
             ClientMaxPacketSize = peerMaximumPacketSize;
             PeerInitialWindowSize = peerInitialWindowSize;
             PeerMaximumPacketSize = peerMaximumPacketSize;
 
-            // Flush bytes produced while pending (in arrival order).
-            if (_pendingSends.Count > 0)
+            lock (_windowLocker)
             {
-                foreach (var chunk in _pendingSends)
-                    SendData(chunk);
-                _pendingSends.Clear();
+                ClientWindowSize = peerInitialWindowSize;
+                PendingConfirmation = false;
+
+                // Wake any sender that already parked on the zero window -
+                // BOTH kinds: Monitor.Wait (synchronous SendData) via
+                // PulseAll, and the async WaitForWindowAsync TCS waiters.
+                Monitor.PulseAll(_windowLocker);
+                TaskCompletionSource<bool> signal = null;
+                if (_windowWaiters > 0)
+                {
+                    signal = _windowTcs;
+                    _windowTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                }
+
+                // Flush bytes produced while pending (in arrival order).
+                // SendData re-enters _windowLocker (Monitor is reentrant) and
+                // sends directly now that the flag is cleared.
+                if (_pendingSends.Count > 0)
+                {
+                    if (Log.IsEnabled(LogLevel.Debug))
+                        Log.Debug($"Channel {ServerChannelId} confirmed; flushing {_pendingSends.Count} buffered chunks.");
+                    foreach (var chunk in _pendingSends)
+                        SendData(chunk);
+                    _pendingSends.Clear();
+                }
+
+                signal?.TrySetResult(true);
             }
         }
 
@@ -123,8 +151,15 @@ namespace FxSsh.Services
         /// <summary>Gets the maximum channel data packet size this server accepts, in bytes.</summary>
         public uint ServerMaxPacketSize { get; private set; }
 
-        /// <summary>True for a server-initiated channel awaiting OPEN_CONFIRMATION.</summary>
-        public bool PendingConfirmation { get; private set; }
+        private volatile bool _pendingConfirmation;
+        /// <summary>
+        /// True for a server-initiated channel awaiting OPEN_CONFIRMATION.
+        /// Volatile: SendDataAsync on a pump thread reads this outside any
+        /// lock while the session thread clears it in OnConfirmed - a stale
+        /// read would send the caller to the direct path with an unresolved
+        /// (zero) peer window.
+        /// </summary>
+        public bool PendingConfirmation { get => _pendingConfirmation; private set => _pendingConfirmation = value; }
 
         /// <summary>Window advertised by the peer once OPEN_CONFIRMATION arrives; 0 until then.</summary>
         public uint PeerInitialWindowSize { get; private set; }
@@ -175,16 +210,22 @@ namespace FxSsh.Services
 
             // Server-initiated channels buffer outbound bytes until the peer's
             // OPEN_CONFIRMATION resolves ClientChannelId and the peer window.
+            // The check-and-queue is atomic with OnConfirmed's flag clear
+            // (both under _windowLocker): a sender must never fall through to
+            // the direct path while the peer window is still unresolved.
             // Slice the caller's memory instead of Clone() - ReadOnlyMemory<byte>
             // is a by-value view over the caller's buffer, safe to retain only
             // if the caller guarantees the buffer outlives the flush. Downstream
             // services hand us bytes they themselves own for the channel's
             // lifetime (terminal pipes, tcp sockets, sftp), so a slice here is
             // safe without a copy.
-            if (PendingConfirmation)
+            lock (_windowLocker)
             {
-                _pendingSends.Add(data);
-                return;
+                if (PendingConfirmation)
+                {
+                    _pendingSends.Add(data);
+                    return;
+                }
             }
 
             // Fresh message per chunk: Session.SendMessage may hold the
@@ -254,11 +295,19 @@ namespace FxSsh.Services
             }
 
             // Same buffering semantics as SendData: server-initiated channels
-            // buffer outbound bytes until the peer's OPEN_CONFIRMATION.
-            if (PendingConfirmation)
+            // buffer outbound bytes until the peer's OPEN_CONFIRMATION. The
+            // check-and-queue is atomic with OnConfirmed's flag clear (both
+            // under _windowLocker) so a sender never falls through to the
+            // direct path while the peer window is still unresolved.
+            lock (_windowLocker)
             {
-                _pendingSends.Add(data);
-                return;
+                if (PendingConfirmation)
+                {
+                    _pendingSends.Add(data);
+                    if (Log.IsEnabled(LogLevel.Trace))
+                        Log.Trace($"SendDataAsync queued: channel={ServerChannelId} len={data.Length}.");
+                    return;
+                }
             }
 
             // Fresh message per chunk: Session.SendMessage may hold the
@@ -288,6 +337,8 @@ namespace FxSsh.Services
                     // instead of Monitor.Wait, so no thread is blocked. The
                     // loop re-checks the window after every wake-up, exactly
                     // like the synchronous path re-evaluates after PulseAll.
+                    if (Log.IsEnabled(LogLevel.Trace))
+                        Log.Trace($"SendDataAsync parked on channel {ServerChannelId}: peer window exhausted ({ClientWindowSize} bytes left).");
                     await WaitForWindowAsync();
                     continue;
                 }

@@ -182,11 +182,13 @@ namespace FxSsh.Services.Sftp
             channel.DataReceived += (_, data) => OnData(data);
             channel.EofReceived += (_, _) =>
             {
-                // Peer finished sending (RFC 4254 6.2): echo EOF and close
-                // our side so the client's bye/close handshake completes
-                // instead of hanging.
+                // Peer finished sending (RFC 4254 6.2): echo EOF, then close
+                // our side carrying exit-status 0 (RFC 4254 6.10) so clients
+                // such as scp observe a successful subsystem exit instead of
+                // an unknown (-1) status. The engine's OnClose ->
+                // CloseReceived(0) path then finds the channel already closed.
                 channel.SendEof();
-                channel.SendClose();
+                channel.SendClose(0);
             };
             channel.CloseReceived += (_, _) => OnClose();
 

@@ -1,0 +1,14 @@
+﻿<Project Sdk="MSTest.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <SignAssembly>true</SignAssembly>
+    <AssemblyOriginatorKeyFile>..\FxSsh\FxSsh.snk</AssemblyOriginatorKeyFile>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FxSsh\FxSsh.csproj" />
+  </ItemGroup>
+
+</Project>

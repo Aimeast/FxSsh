@@ -101,7 +101,10 @@ namespace FxSsh.Services.Sftp
 
             var mode = MapMode(flags);
             var append = (flags & SftpOpenFlags.Append) != 0;
-            var fs = new FileStream(absPath, mode, access);
+            // Share write/delete so a FSETSTAT (or a second SFTP open) can
+            // open the file again while this handle is alive - without this,
+            // Windows fails the second open with "used by another process".
+            var fs = new FileStream(absPath, mode, access, FileShare.Read | FileShare.Write | FileShare.Delete);
             return new LocalFileHandle(fs, absPath, append, _readOnly);
         }
 
@@ -140,7 +143,10 @@ namespace FxSsh.Services.Sftp
             {
                 if (File.Exists(absPath) || Directory.Exists(absPath))
                     return GetAttr(new FileInfo(absPath));
-                throw new FileNotFoundException(null, absPath);
+                // Explicit ASCII message: FileNotFoundException's default
+                // (null-message) text is localized and confuses some SFTP
+                // clients (scp) that surface it verbatim.
+                throw new FileNotFoundException($"File not found: {absPath}", absPath);
             }
 
             // LSTAT: report the link itself, not its target. .NET exposes
@@ -376,7 +382,9 @@ namespace FxSsh.Services.Sftp
             if (attr.Size != null && info is FileInfo file)
             {
                 // Truncate/extend the file to the requested size (section 6.9).
-                using var fs = new FileStream(file.FullName, FileMode.Open, FileAccess.Write);
+                // Share-friendly: the caller may hold an open SFTP handle on
+                // the same file (scp's post-upload FSETSTAT does exactly this).
+                using var fs = new FileStream(file.FullName, FileMode.Open, FileAccess.Write, FileShare.Read | FileShare.Write | FileShare.Delete);
                 fs.SetLength((long)attr.Size.Value);
             }
         }
