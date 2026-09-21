@@ -35,6 +35,7 @@ namespace FxSsh.Services
         private readonly CancellationTokenSource _cts = new();
         private readonly List<(Channel channel, Socket socket)> _bridges = [];
         private readonly object _bridgeLocker = new();
+        private bool _disposed;
 
         /// <summary>Bound host the listener actually used (may differ from requested when host was empty).</summary>
         public string BoundAddress { get; }
@@ -85,43 +86,50 @@ namespace FxSsh.Services
 
         private async Task AcceptLoopAsync()
         {
-            while (!_cts.IsCancellationRequested)
+            try
             {
-                Socket client;
-                try
+                while (!_cts.IsCancellationRequested)
                 {
-                    client = await _listener.AcceptSocketAsync(_cts.Token);
-                }
-                catch (OperationCanceledException) { break; }
-                catch (SocketException) { break; }   // listener stopped
-                catch (ObjectDisposedException) { break; }
+                    Socket client;
+                    try
+                    {
+                        client = await _listener.AcceptSocketAsync(_cts.Token);
+                    }
+                    catch (OperationCanceledException) { break; }
+                    catch (SocketException) { break; }   // listener stopped
+                    catch (ObjectDisposedException) { break; }
 
-                var remote = (IPEndPoint)client.RemoteEndPoint;
+                    var remote = (IPEndPoint)client.RemoteEndPoint;
 
-                // Open an outbound forwarded-tcpip channel to the peer. The
-                // factory is responsible for sending SSH_MSG_CHANNEL_OPEN and
-                // returning the Channel handle. If the peer rejects, drop the
-                // TCP connection silently.
-                Channel channel;
-                try
-                {
-                    channel = _openForwardedChannel(BoundAddress, BoundPort,
-                        remote.Address.ToString(), (uint)remote.Port);
-                }
-                catch
-                {
-                    Log.Warn($"Forwarded channel open failed for {remote}; dropping TCP connection.");
-                    try { client.Close(); } catch { }
-                    continue;
-                }
+                    // Open an outbound forwarded-tcpip channel to the peer. The
+                    // factory is responsible for sending SSH_MSG_CHANNEL_OPEN and
+                    // returning the Channel handle. If the peer rejects, drop the
+                    // TCP connection silently.
+                    Channel channel;
+                    try
+                    {
+                        channel = _openForwardedChannel(BoundAddress, BoundPort,
+                            remote.Address.ToString(), (uint)remote.Port);
+                    }
+                    catch
+                    {
+                        Log.Warn($"Forwarded channel open failed for {remote}; dropping TCP connection.");
+                        try { client.Close(); } catch { }
+                        continue;
+                    }
 
-                if (channel == null)
-                {
-                    try { client.Close(); } catch { }
-                    continue;
-                }
+                    if (channel == null)
+                    {
+                        try { client.Close(); } catch { }
+                        continue;
+                    }
 
-                _ = BridgeAsync(channel, client);
+                    _ = BridgeAsync(channel, client);
+                }
+            }
+            catch (ObjectDisposedException)
+            {
+                // Dispose() released the CTS while this loop was polling it.
             }
         }
 
@@ -166,6 +174,22 @@ namespace FxSsh.Services
                 try { sendQueue.Writer.WriteAsync(owned).AsTask().GetAwaiter().GetResult(); }
                 catch { owned.Dispose(); }
             };
+
+            // A force-closed channel (e.g. the peer rejected the forwarded
+            // open) will never see a CHANNEL_CLOSE exchange - release the
+            // bridged socket so the pump ends instead of lingering forever.
+            var forceClosed = false;
+            channel.ForceClosed += (_, _) =>
+            {
+                forceClosed = true;
+                sendQueue.Writer.TryComplete();
+                // Shut down gracefully (FIN) before closing: a bare Close
+                // can surface as RST on the peer, which aborts forwarded
+                // connections mid data.
+                try { socket.Shutdown(SocketShutdown.Both); } catch { }
+                try { socket.Close(); } catch { }
+            };
+
             channel.CloseReceived += (_, _) =>
             {
                 try
@@ -204,7 +228,8 @@ namespace FxSsh.Services
             }
             finally
             {
-                channel.SendEof();
+                if (!forceClosed)
+                    channel.SendEof();
                 try { socket.Close(); } catch { }
 
                 lock (_bridgeLocker)
@@ -272,6 +297,10 @@ namespace FxSsh.Services
         /// </summary>
         public void Dispose()
         {
+            if (_disposed)
+                return;
+            _disposed = true;
+
             Log.Debug($"Forwarding listener {BoundAddress}:{BoundPort} stopping.");
             _cts.Cancel();
             try { _listener.Stop(); } catch { }

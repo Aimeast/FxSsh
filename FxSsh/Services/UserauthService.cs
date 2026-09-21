@@ -179,6 +179,16 @@ namespace FxSsh.Services
 
                 var sig = keyAlg.GetSignature(message.Signature);
 
+                // A signed request can only be verified against an established
+                // session id; one arriving before key exchange is malformed
+                // and is rejected instead of dereferencing a null id.
+                if (_session.SessionId == null)
+                {
+                    Log.Warn($"Public key signature received before key exchange: user {message.Username}.");
+                    _session.SendMessage(new FailureMessage());
+                    return;
+                }
+
                 var bytes = new SshDataWriter(4 + _session.SessionId.Length + message.PayloadWithoutSignature.Length)
                     .WriteBinary(_session.SessionId)
                     .WriteBytes(message.PayloadWithoutSignature)

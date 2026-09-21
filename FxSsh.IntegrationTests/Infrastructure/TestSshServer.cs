@@ -50,6 +50,10 @@ namespace FxSsh.IntegrationTests.Infrastructure
 
         public bool ReadOnlySftp { get; set; }
 
+        // Seconds of idle before the server starts keepalive probing (0 =
+        // disabled). Applied per session when a connection is accepted.
+        public int KeepaliveIdleSeconds { get; set; }
+
         /// <summary>Fingerprints accepted for publickey auth (when non-empty, other keys are rejected).</summary>
         public HashSet<string> AcceptedFingerprints { get; } = new(StringComparer.Ordinal);
 
@@ -57,7 +61,7 @@ namespace FxSsh.IntegrationTests.Infrastructure
 
         public List<string> ExecCommands { get; } = [];
 
-        public static async Task<TestSshServer> StartAsync(bool allowNoneAuth = false, bool readOnlySftp = false)
+        public static async Task<TestSshServer> StartAsync(bool allowNoneAuth = false, bool readOnlySftp = false, int keepaliveIdleSeconds = 0)
         {
             Log.Configure(new LogOptions
             {
@@ -78,6 +82,7 @@ namespace FxSsh.IntegrationTests.Infrastructure
             {
                 AllowNoneAuth = allowNoneAuth,
                 ReadOnlySftp = readOnlySftp,
+                KeepaliveIdleSeconds = keepaliveIdleSeconds,
             };
 
             server.ConnectionAccepted += fixture.OnConnectionAccepted;
@@ -95,6 +100,9 @@ namespace FxSsh.IntegrationTests.Infrastructure
 
         private void OnConnectionAccepted(object? sender, Session session)
         {
+            if (KeepaliveIdleSeconds > 0)
+                session.ConfigureKeepalive(TimeSpan.FromSeconds(KeepaliveIdleSeconds));
+
             session.ServiceRegistered += (_, service) =>
             {
                 if (service is UserAuthService userAuth)

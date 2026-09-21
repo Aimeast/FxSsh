@@ -15,10 +15,10 @@ jobs:
     name: Code style
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 11.0.x
           # .NET 11 is still in RC at the time of writing; drop this once the
@@ -39,10 +39,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 11.0.x
           dotnet-quality: preview
@@ -51,12 +51,14 @@ jobs:
         run: dotnet build --configuration Release
 
       # Scoped to the unit project so the coverage baseline stays unit-only
-      # and the integration job below owns the real-client runs.
+      # and the integration job below owns the real-client runs. The binary
+      # .coverage file is uploaded so the coverage job can merge it with the
+      # integration runs into one combined report.
       - name: Run unit tests
         run: >-
           dotnet test FxSsh.Tests/FxSsh.Tests.csproj --configuration Release --no-build
           --results-directory ${{ runner.temp }}/test-results
-          --report-trx --coverage --coverage-output-format cobertura
+          --report-trx --coverage --coverage-output ${{ runner.temp }}/test-results/unit.coverage
 
       - name: Upload test results
         uses: actions/upload-artifact@v7
@@ -76,10 +78,10 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+        uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 11.0.x
           dotnet-quality: preview
@@ -106,14 +108,15 @@ jobs:
       - name: Build
         run: dotnet build FxSsh.IntegrationTests/FxSsh.IntegrationTests.csproj --configuration Release
 
-      # GitHub-hosted runners ship an OpenSSH client; tests without one
-      # report skipped instead of failing.
+      # Coverage is collected here too: the real-client runs exercise the
+      # handshake, PTY and transport code paths that unit tests cannot
+      # reach. The coverage job merges all four .coverage files.
       - name: Run OpenSSH integration tests
         run: >-
           dotnet test FxSsh.IntegrationTests/FxSsh.IntegrationTests.csproj
           --configuration Release --no-build
           --results-directory ${{ runner.temp }}/test-results
-          --report-trx
+          --report-trx --coverage --coverage-output ${{ runner.temp }}/test-results/integration.coverage
 
       - name: Upload test results
         uses: actions/upload-artifact@v7
@@ -122,4 +125,60 @@ jobs:
           name: integration-results-${{ matrix.os }}
           path: ${{ runner.temp }}/test-results
           if-no-files-found: warn
+          retention-days: 7
+
+  coverage:
+    name: Combined coverage
+    runs-on: ubuntu-latest
+    needs: [unit, integration]
+    steps:
+      - name: Download unit coverage (ubuntu)
+        uses: actions/download-artifact@v8
+        with:
+          name: unit-results-ubuntu-latest
+          path: coverage/unit-ubuntu
+
+      - name: Download unit coverage (windows)
+        uses: actions/download-artifact@v8
+        with:
+          name: unit-results-windows-latest
+          path: coverage/unit-windows
+
+      - name: Download integration coverage (ubuntu)
+        uses: actions/download-artifact@v8
+        with:
+          name: integration-results-ubuntu-latest
+          path: coverage/integration-ubuntu
+
+      - name: Download integration coverage (windows)
+        uses: actions/download-artifact@v8
+        with:
+          name: integration-results-windows-latest
+          path: coverage/integration-windows
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v6
+        with:
+          dotnet-version: 11.0.x
+          dotnet-quality: preview
+
+      - name: Install dotnet-coverage
+        run: dotnet tool install -g dotnet-coverage
+
+      - name: Merge coverage from all four runs
+        shell: bash
+        run: |
+          "$HOME/.dotnet/tools/dotnet-coverage" merge \
+            -f cobertura \
+            -o combined.cobertura.xml \
+            coverage/unit-ubuntu/unit.coverage \
+            coverage/unit-windows/unit.coverage \
+            coverage/integration-ubuntu/integration.coverage \
+            coverage/integration-windows/integration.coverage
+
+      - name: Upload combined coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: combined-coverage
+          path: combined.cobertura.xml
           retention-days: 7

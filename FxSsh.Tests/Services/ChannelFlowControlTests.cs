@@ -175,6 +175,18 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public void SendSignalClose_marks_closed_and_is_idempotent()
+        {
+            var channel = new SessionChannel(_connection, 1, 1000, 32768, 1000);
+
+            channel.SendSignalClose("TERM");
+            Assert.IsTrue(channel.ServerClosed);
+
+            channel.SendSignalClose("KILL"); // second close must not throw
+            channel.SendClose();             // no-op after signal close
+        }
+
+        [TestMethod]
         public void OnConfirmed_resolves_the_peer_and_flushes_pending_sends()
         {
             var pending = new PendingChannel(_connection, serverChannelId: 9);

@@ -188,6 +188,14 @@ namespace FxSsh.Services
         public event EventHandler<WindowChangeArgs> WindowChange;
 
         /// <summary>
+        /// Raised exactly once when the channel is force-closed (peer rejected
+        /// the open, session teardown, or both sides closed). Bridges that
+        /// hold external resources (e.g. a forwarded TCP socket) must release
+        /// them when this fires - no CHANNEL_CLOSE exchange will follow.
+        /// </summary>
+        internal event EventHandler ForceClosed;
+
+        /// <summary>
         /// Sends the supplied bytes to the peer as SSH_MSG_CHANNEL_DATA
         /// (RFC 4254 section 5.2), splitting them into chunks that respect
         /// both the peer's remaining flow-control window and its maximum
@@ -582,6 +590,8 @@ namespace FxSsh.Services
             }
 
             signal?.TrySetResult(true);
+
+            ForceClosed?.Invoke(this, EventArgs.Empty);
 
             _connectionService.RemoveChannel(this);
         }

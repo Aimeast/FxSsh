@@ -110,5 +110,29 @@ namespace FxSsh.Tests.Catalog
 
             Assert.AreEqual(0, _catalog.HmacCollection.BuildCollection().Count);
         }
+
+        [TestMethod]
+        public void Every_negotiable_factory_constructs_an_instance()
+        {
+            // Invoking the factories with a null key is what the session does
+            // (keys are imported later from wire data / host key PEMs).
+            InvokeAllFactories(_catalog.HostKeyCollection, "hostkey");
+            InvokeAllFactories(_catalog.KeyExchangeCollection, "kex");
+            InvokeAllFactories(_catalog.EncryptionCollection, "cipher");
+            InvokeAllFactories(_catalog.HmacCollection, "hmac");
+            InvokeAllFactories(_catalog.CompressionCollection, "compression");
+        }
+
+        private static void InvokeAllFactories<T>(AlgorithmCollectionBuilder<T> builder, string category)
+        {
+            var frozen = builder.BuildCollection();
+            Assert.IsTrue(frozen.Count > 0, $"{category} collection is empty");
+
+            foreach (var name in frozen.Keys)
+            {
+                var factory = frozen[name];
+                Assert.IsNotNull(factory(null), $"{category}/{name} factory returned null");
+            }
+        }
     }
 }

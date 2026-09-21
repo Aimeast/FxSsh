@@ -442,9 +442,9 @@ namespace FxSsh.Services
         }
 
         /// <summary>
-        /// Peer rejected our server-initiated forwarded-tcpip open. Tear down
-        /// the pending channel; the associated TCP socket (managed by
-        /// PortForwardingService) will be closed separately.
+        /// Peer rejected our server-initiated forwarded-tcpip open. Force the
+        /// pending channel closed so anything bridged to it (the forwarded
+        /// TCP socket) is torn down instead of lingering forever.
         /// </summary>
         private void HandleMessage(ChannelOpenFailureMessage message)
         {
@@ -456,7 +456,7 @@ namespace FxSsh.Services
             {
                 lock (_locker)
                     _channels.Remove(pending.ServerChannelId);
-                // Pending channel never registered with a bridge, so just drop.
+                pending.ForceClose();
             }
         }
 
