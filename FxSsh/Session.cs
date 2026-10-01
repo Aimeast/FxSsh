@@ -81,6 +81,8 @@ namespace FxSsh
         private Stopwatch _lastActivity;
         private int _missedProbes;
         private Timer _keepaliveTimer;
+        private TimeSpan _inactivityTimeout = TimeSpan.Zero;   // <=0 means disabled
+        private Timer _inactivityTimer;
 
         private uint _outboundPacketSequence;
         private uint _inboundPacketSequence;
@@ -264,6 +266,8 @@ namespace FxSsh
 
             _keepaliveTimer?.Dispose();
             _keepaliveTimer = null;
+            _inactivityTimer?.Dispose();
+            _inactivityTimer = null;
 
             if (reason == DisconnectReason.ByApplication)
             {
@@ -335,6 +339,11 @@ namespace FxSsh
                     var memory = _receivePipe.Writer.GetMemory(1024);
                     var bytesRead = await _socket.ReceiveAsync(memory, SocketFlags.None, token);
                     if (bytesRead == 0) break;
+
+                    // Raw inbound bytes are the finest-grained liveness signal
+                    // (they also cover the pre-handshake version exchange, so
+                    // stalled clients are caught before authentication).
+                    _lastActivity?.Restart();
 
                     _receivePipe.Writer.Advance(bytesRead);
                     var result = await _receivePipe.Writer.FlushAsync(token);
@@ -1420,6 +1429,63 @@ namespace FxSsh
             {
                 Log.Debug($"Keepalive probe {missed}/{MaxMissedProbes} unanswered.");
             }
+        }
+
+        /// <summary>
+        /// Enable or update the server-side inactivity timeout: when no
+        /// traffic has flowed in either direction for <paramref name="timeout"/>,
+        /// the session is disconnected. The shared idle clock refreshes on
+        /// every inbound byte (raw, including the pre-handshake version
+        /// exchange) and every outbound frame, so a session the server is
+        /// actively streaming to is never killed - a wedged slow consumer is
+        /// still reaped once TCP backpressure stalls the send pump. Unlike
+        /// <see cref="ConfigureKeepalive"/> this is a hard cap that needs no
+        /// cooperation from the client. Pass a non-positive value to disable
+        /// the timeout. Calling this before the session is established is
+        /// allowed; the idle clock starts immediately. A server-wide default
+        /// can be set through <see cref="SshServer.InactivityTimeout"/>.
+        /// </summary>
+        public void ConfigureInactivityTimeout(TimeSpan timeout)
+        {
+            lock (_locker)
+            {
+                _inactivityTimeout = timeout;
+
+                if (timeout <= TimeSpan.Zero)
+                {
+                    _inactivityTimer?.Dispose();
+                    _inactivityTimer = null;
+                    Log.Debug("Inactivity timeout disabled.");
+                    return;
+                }
+
+                Log.Debug($"Inactivity timeout enabled, threshold {timeout}.");
+
+                _lastActivity ??= Stopwatch.StartNew();
+
+                // Period = timeout: the check re-fires at the same cadence, so
+                // the session is torn down at the first tick past the window.
+                var due = (int)Math.Min(timeout.TotalMilliseconds, int.MaxValue);
+                if (_inactivityTimer == null)
+                    _inactivityTimer = new Timer(InactivityTick, null, due, due);
+                else
+                    _inactivityTimer.Change(due, due);
+            }
+        }
+
+        private void InactivityTick(object state)
+        {
+            // _inactivityTimeout was zeroed by a concurrent disable - a stale
+            // tick must never disconnect.
+            if (_disconnected || _socket == null || _inactivityTimeout <= TimeSpan.Zero)
+                return;
+
+            // Inbound traffic arrived inside the window - not idle long enough.
+            if (_lastActivity?.Elapsed < _inactivityTimeout)
+                return;
+
+            Log.Warn($"No traffic for {_inactivityTimeout}; disconnecting.");
+            Disconnect(DisconnectReason.ByApplication, "Connection inactive for too long.");
         }
 
         private void HandleMessage(ServiceRequestMessage message)

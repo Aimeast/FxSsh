@@ -68,6 +68,19 @@ namespace FxSsh
         public AlgorithmSelection Algorithms { get; } = new();
 
         /// <summary>
+        /// Gets or sets the server-wide inactivity timeout applied to every
+        /// session accepted while the property is set: a session with no
+        /// traffic in either direction for this span is disconnected. Null
+        /// (the default) disables the check. A
+        /// <see cref="Session.ConfigureInactivityTimeout"/> call inside a
+        /// <see cref="ConnectionAccepted"/> handler overrides it per session;
+        /// keepalive probing enabled through
+        /// <see cref="Session.ConfigureKeepalive"/> keeps responsive clients
+        /// alive across the window, since their replies are inbound traffic.
+        /// </summary>
+        public TimeSpan? InactivityTimeout { get; set; }
+
+        /// <summary>
         /// Occurs when a client connection has been accepted and a
         /// <see cref="Session"/> created for it, before the SSH handshake
         /// starts. Handlers can configure the session or subscribe to its
@@ -268,6 +281,11 @@ namespace FxSsh
             session.Disconnected += (ss, ee) => _sessions.TryRemove(session.Id, out _);
 
             _sessions.TryAdd(session.Id, session);
+
+            // Applied before ConnectionAccepted so a handler can still
+            // override the server-wide default for this session.
+            if (InactivityTimeout is { } inactivityTimeout)
+                session.ConfigureInactivityTimeout(inactivityTimeout);
 
             try
             {

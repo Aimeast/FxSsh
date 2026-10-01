@@ -162,5 +162,120 @@ namespace FxSsh.Tests.Services
                 server.Dispose();
             }
         }
+
+        [TestMethod]
+        public async Task Inactivity_timeout_disconnects_an_idle_session()
+        {
+            var (client, server) = CreateSocketPair();
+            try
+            {
+                var session = new Session(server, new Dictionary<string, string>(), "SSH-2.0-Unit");
+                var disconnected = new TaskCompletionSource<bool>();
+                session.Disconnected += (_, _) => disconnected.TrySetResult(true);
+
+                session.ConfigureInactivityTimeout(TimeSpan.FromMilliseconds(300));
+                _ = session.StartAsync();
+                await client.SendAsync("SSH-2.0-Unit\r\n"u8.ToArray(), SocketFlags.None);
+
+                // The banner and KEXINIT the server sends refresh the shared
+                // idle clock once; after that, silence in both directions
+                // must trip the hard cap within a timeout window or two.
+                await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            finally
+            {
+                client.Dispose();
+                server.Dispose();
+            }
+        }
+
+        [TestMethod]
+        public async Task Inactivity_timeout_fires_without_any_client_traffic()
+        {
+            var (client, server) = CreateSocketPair();
+            try
+            {
+                var session = new Session(server, new Dictionary<string, string>(), "SSH-2.0-Unit");
+                var disconnected = new TaskCompletionSource<bool>();
+                session.Disconnected += (_, _) => disconnected.TrySetResult(true);
+
+                // Unlike keepalive, the timeout needs no cooperation from the
+                // client: a peer that never speaks at all is still reaped.
+                session.ConfigureInactivityTimeout(TimeSpan.FromMilliseconds(300));
+                _ = session.StartAsync();
+
+                await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            finally
+            {
+                client.Dispose();
+                server.Dispose();
+            }
+        }
+
+        [TestMethod]
+        public async Task Ongoing_traffic_defers_the_inactivity_disconnect()
+        {
+            var (client, server) = CreateSocketPair();
+            try
+            {
+                var session = new Session(server, new Dictionary<string, string>(), "SSH-2.0-X");
+                var disconnected = new TaskCompletionSource<bool>();
+                session.Disconnected += (_, _) => disconnected.TrySetResult(true);
+
+                session.ConfigureInactivityTimeout(TimeSpan.FromMilliseconds(600));
+                _ = session.StartAsync();
+                await client.SendAsync("SSH-2.0-X\r\n"u8.ToArray(), SocketFlags.None);
+
+                // Same framing trick as the keepalive reply test: each
+                // plaintext SSH_MSG_REQUEST_FAILURE is inbound traffic and
+                // defers the timeout, so the session must stay alive.
+                var probeReply = new byte[]
+                {
+                    0x00, 0x00, 0x00, 0x0C, // packet length = 12
+                    0x0A,                   // padding length = 10
+                    0x52,                   // SSH_MSG_REQUEST_FAILURE
+                    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                };
+
+                for (var i = 0; i < 12; i++)
+                {
+                    await Task.Delay(200);
+                    await client.SendAsync(probeReply, SocketFlags.None);
+                    Assert.IsFalse(disconnected.Task.IsCompleted, $"disconnect after {(i + 1) * 200} ms of ongoing traffic");
+                }
+
+                // Traffic stops: the hard cap must now fire.
+                await disconnected.Task.WaitAsync(TimeSpan.FromSeconds(10));
+            }
+            finally
+            {
+                client.Dispose();
+                server.Dispose();
+            }
+        }
+
+        [TestMethod]
+        public async Task Without_an_inactivity_timeout_an_idle_session_stays_connected()
+        {
+            var (client, server) = CreateSocketPair();
+            try
+            {
+                var session = new Session(server, new Dictionary<string, string>(), "SSH-2.0-X");
+                var disconnected = new TaskCompletionSource<bool>();
+                session.Disconnected += (_, _) => disconnected.TrySetResult(true);
+
+                _ = session.StartAsync();
+                await client.SendAsync("SSH-2.0-X\r\n"u8.ToArray(), SocketFlags.None);
+                await Task.Delay(1000);
+
+                Assert.IsFalse(disconnected.Task.IsCompleted, "session was disconnected although no timeout is configured");
+            }
+            finally
+            {
+                client.Dispose();
+                server.Dispose();
+            }
+        }
     }
 }

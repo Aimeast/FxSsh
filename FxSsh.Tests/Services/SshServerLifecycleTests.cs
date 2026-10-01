@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using FxSsh;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -141,6 +142,93 @@ namespace FxSsh.Tests.Services
             var completed = await Task.WhenAny(receive, Task.Delay(10_000));
             Assert.AreSame(receive, completed, "the server never closed the connection");
             Assert.AreEqual(0, receive.Result, "expected a clean shutdown (0 bytes)");
+        }
+
+        [TestMethod]
+        public async Task InactivityTimeout_reaps_a_session_that_never_completes_the_handshake()
+        {
+            var port = GetFreePort();
+            using var server = CreateServer(port);
+            server.InactivityTimeout = TimeSpan.FromMilliseconds(300);
+            server.AddHostKey("ecdsa-sha2-nistp256", KeyGenerator.GenerateECDsaKeyPem("nistp256"));
+            await server.StartAsync();
+
+            try
+            {
+                using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
+
+                // The client stays silent: after the server-side banner and
+                // KEXINIT burst, the inactivity timeout must close the
+                // connection on its own (the disconnect arrives as data
+                // first, then a clean EOF).
+                var buffer = new byte[4096];
+                var total = 0;
+                while (true)
+                {
+                    int received;
+                    try
+                    {
+                        received = await client.ReceiveAsync(buffer, SocketFlags.None).WaitAsync(TimeSpan.FromSeconds(5));
+                    }
+                    catch (TimeoutException)
+                    {
+                        Assert.Fail("the server never closed the idle connection");
+                        return;
+                    }
+
+                    if (received == 0)
+                        break;
+
+                    total += received;
+                }
+
+                Assert.IsTrue(total > 0, "expected at least the server banner before the disconnect");
+            }
+            finally
+            {
+                await server.StopAsync();
+            }
+        }
+
+        [TestMethod]
+        public async Task Without_InactivityTimeout_a_silent_connection_is_kept()
+        {
+            var port = GetFreePort();
+            using var server = CreateServer(port);
+            server.AddHostKey("ecdsa-sha2-nistp256", KeyGenerator.GenerateECDsaKeyPem("nistp256"));
+            await server.StartAsync();
+
+            try
+            {
+                using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+                await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
+
+                // Drain whatever the server sends up front (banner, KEXINIT)
+                // for one second. A 0-byte read would mean the server closed
+                // the connection, which must not happen without a timeout.
+                var buffer = new byte[4096];
+                var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(1);
+                while (DateTime.UtcNow < deadline)
+                {
+                    using var slice = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+                    int received;
+                    try
+                    {
+                        received = await client.ReceiveAsync(buffer, SocketFlags.None, slice.Token);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        continue; // nothing arrived in this slice - still open
+                    }
+
+                    Assert.AreNotEqual(0, received, "connection was closed although no InactivityTimeout is configured");
+                }
+            }
+            finally
+            {
+                await server.StopAsync();
+            }
         }
 
         private static async Task<string> ReadLineAsync(Socket socket)
