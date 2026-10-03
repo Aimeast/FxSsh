@@ -79,13 +79,6 @@ TA==
             server.AddHostKey("ecdsa-sha2-nistp384", ecdsap384Pem);
             server.AddHostKey("ecdsa-sha2-nistp521", ecdsap521Pem);
 
-            // --- Plug in algorithms via AlgorithmSelection.ConfigureHazmat
-            // (issue #62). ConfigureHazmat is the only way to mutate the
-            // per-server algorithm set, and must run before Start() (calling it
-            // afterwards throws InvalidOperationException). The resulting
-            // suites are logged at startup; negotiating a Custom/Obsolete
-            // entry logs a warning.
-
             server.Algorithms.ConfigureHazmat(catalog =>
             {
                 // 1. Old name: an alias reuses the built-in factory - no new
@@ -169,14 +162,6 @@ TA==
             e.Accepted = allow;
         }
 
-        /// <summary>
-        /// Fire-and-forget channel data send that swallows teardown
-        /// exceptions. The event handlers below are async void
-        /// (EventHandler&lt;T&gt;), so any ObjectDisposedException escaping
-        /// from Channel.SendDataAsync after ForceClose would land on the
-        /// thread pool and FailFast the whole process. Teardown races are
-        /// expected once the peer disconnects or the session is closed.
-        /// </summary>
         static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
         {
             try
@@ -192,10 +177,6 @@ TA==
             }
         }
 
-        /// <summary>
-        /// Fire-and-forget PTY input write that swallows teardown exceptions
-        /// (same rationale as <see cref="TrySendChannelDataAsync"/>).
-        /// </summary>
         static async Task TryTerminalInputAsync(ITerminal terminal, ReadOnlyMemory<byte> data)
         {
             try

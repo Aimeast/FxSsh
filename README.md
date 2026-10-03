@@ -1,14 +1,16 @@
 ﻿## FxSsh
+
+[![CI](https://github.com/Aimeast/FxSsh/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/Aimeast/FxSsh/actions/workflows/ci.yml?query=branch%3Adev)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Faimeast.github.io%2FFxSsh%2Fcoverage.json)](https://aimeast.github.io/FxSsh/)
+[![NuGet](https://img.shields.io/nuget/v/FxSsh)](https://www.nuget.org/packages/FxSsh)
+[![NuGet downloads](https://img.shields.io/nuget/dt/FxSsh)](https://www.nuget.org/packages/FxSsh)
+[![.NET](https://img.shields.io/badge/dynamic/xml?url=https%3A%2F%2Fraw.githubusercontent.com%2FAimeast%2FFxSsh%2Fdev%2FFxSsh%2FFxSsh.csproj&query=%2F%2FTargetFramework&label=.NET&color=512BD4)](https://github.com/Aimeast/FxSsh/blob/dev/FxSsh/FxSsh.csproj)
+[![License](https://img.shields.io/github/license/Aimeast/FxSsh)](LICENSE.md)
+[![GitHub stars](https://img.shields.io/github/stars/Aimeast/FxSsh?style=social)](https://github.com/Aimeast/FxSsh/stargazers)
+
 FxSsh is a lightweight [SSH](https://en.wikipedia.org/wiki/Secure_Shell) server side library.
 
 ---
-### Nuget
-[![NuGet version](https://badge.fury.io/nu/FxSsh.svg)](https://www.nuget.org/packages/FxSsh/)
-
-`PM> Install-Package FxSsh`
-
-Target `net8.0`
-
 ### RFCs
 FxSsh adheres to the following RFC documents
 - [RFC4250](https://tools.ietf.org/html/rfc4250)  Protocol Assigned Numbers
@@ -52,13 +54,20 @@ FxSsh adheres to the following RFC documents
 | PuTTY           | `Release 0.82`                                  |
 | WinSCP          | `6.3.6` (sftp only)                             |
 
-### Performance Benchmarks
+### Testing
 
-A comprehensive automated test report is available that demonstrates the full capabilities of this project: [benchmark_report.md](https://github.com/Aimeast/FxSsh/blob/dev/benchmark_report.md)
+- `FxSsh.Tests` &mdash; unit tests
+- `FxSsh.IntegrationTests` &mdash; end-to-end tests driven by a real OpenSSH client
+
+CI runs both suites on Ubuntu and Windows on every push to `dev` and every PR,
+merges the four coverage files into one combined report, and publishes it on
+the workflow run's summary page (see the **Actions** tab). The full HTML
+report is available as the run's `coverage-report` artifact.
 
 ### Sample code
 ```cs
 static int windowWidth, windowHeight;
+static byte[] ptyModes;
 
 static void Main(string[] args)
 {
@@ -123,12 +132,6 @@ TA==
     server.AddHostKey("ecdsa-sha2-nistp384", ecdsap384Pem);
     server.AddHostKey("ecdsa-sha2-nistp521", ecdsap521Pem);
 
-    // --- Plug in algorithms via AlgorithmSelection.ConfigureHazmat
-    // (issue #62). ConfigureHazmat is the only way to mutate the
-    // per-server algorithm set, and must run before Start() (calling it
-    // afterwards throws InvalidOperationException). The resulting
-    // suites are logged at startup; negotiating a Custom/Obsolete
-    // entry logs a warning.
     server.Algorithms.ConfigureHazmat(catalog =>
     {
         // 1. Old name: an alias reuses the built-in factory - no new
@@ -212,14 +215,6 @@ static void service_TcpForwardRequestReceived(object sender, TcpForwardRequestAr
     e.Accepted = allow;
 }
 
-/// <summary>
-/// Fire-and-forget channel data send that swallows teardown
-/// exceptions. The event handlers below are async void
-/// (EventHandler&lt;T&gt;), so any ObjectDisposedException escaping
-/// from Channel.SendDataAsync after ForceClose would land on the
-/// thread pool and FailFast the whole process. Teardown races are
-/// expected once the peer disconnects or the session is closed.
-/// </summary>
 static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
 {
     try
@@ -235,10 +230,6 @@ static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
     }
 }
 
-/// <summary>
-/// Fire-and-forget PTY input write that swallows teardown exceptions
-/// (same rationale as <see cref="TrySendChannelDataAsync"/>).
-/// </summary>
 static async Task TryTerminalInputAsync(ITerminal terminal, ReadOnlyMemory<byte> data)
 {
     try
@@ -276,6 +267,7 @@ static void service_PtyReceived(object sender, PtyArgs e)
     Log.Info($"Request to create a PTY received for terminal type {e.Terminal}.");
     windowWidth = (int)e.WidthChars;
     windowHeight = (int)e.HeightRows;
+    ptyModes = e.Modes;
 }
 
 static void service_EnvReceived(object sender, EnvironmentArgs e)
@@ -316,9 +308,9 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
     if (e.ShellType == "shell")
     {
         // Windows: Win32 Pseudo Console (ConPTY, Windows 10 1809+).
-        // Linux: devpts/ptmx (see FxSsh.Services.Pty).
+        // Linux: devpts/ptmx via fork + exec (see FxSsh.Services.Pty).
         var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "bash";
-        var terminal = TerminalFactory.Create(shell, windowWidth, windowHeight);
+        var terminal = TerminalFactory.Create(shell, windowWidth, windowHeight, ptyModes);
 
         e.Channel.WindowChange += (ss, ee) => terminal.Resize((int)ee.WidthColumns, (int)ee.HeightRows);
         e.Channel.DataReceived += async (ss, ee) => await TryTerminalInputAsync(terminal, ee);

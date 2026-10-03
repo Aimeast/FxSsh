@@ -1,7 +1,5 @@
 ﻿<Solution>
   <Folder Name="/Solution Items/">
-    <File Path="benchmark_report.md" />
-    <File Path="benchmark_report_zh-cn.md" />
     <File Path="README.md" />
     <File Path="README_zh-cn.md" />
   </Folder>

@@ -1,16 +1,16 @@
 ﻿## FxSsh
 
+[![CI](https://github.com/Aimeast/FxSsh/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/Aimeast/FxSsh/actions/workflows/ci.yml?query=branch%3Adev)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Faimeast.github.io%2FFxSsh%2Fcoverage.json)](https://aimeast.github.io/FxSsh/)
+[![NuGet](https://img.shields.io/nuget/v/FxSsh)](https://www.nuget.org/packages/FxSsh)
+[![NuGet downloads](https://img.shields.io/nuget/dt/FxSsh)](https://www.nuget.org/packages/FxSsh)
+[![.NET](https://img.shields.io/badge/dynamic/xml?url=https%3A%2F%2Fraw.githubusercontent.com%2FAimeast%2FFxSsh%2Fdev%2FFxSsh%2FFxSsh.csproj&query=%2F%2FTargetFramework&label=.NET&color=512BD4)](https://github.com/Aimeast/FxSsh/blob/dev/FxSsh/FxSsh.csproj)
+[![License](https://img.shields.io/github/license/Aimeast/FxSsh)](LICENSE.md)
+[![GitHub stars](https://img.shields.io/github/stars/Aimeast/FxSsh?style=social)](https://github.com/Aimeast/FxSsh/stargazers)
+
 FxSsh 是一个轻量级的 [SSH](https://en.wikipedia.org/wiki/Secure_Shell) 服务端库。
 
 ---
-
-### Nuget
-
-[![NuGet version](https://badge.fury.io/nu/FxSsh.svg)](https://www.nuget.org/packages/FxSsh/)
-
-`PM> Install-Package FxSsh`
-
-目标框架 `net8.0`
 
 ### RFC 文档
 
@@ -57,14 +57,18 @@ FxSsh 遵循以下 RFC 文档：
 | PuTTY               | `Release 0.82`                                        |
 | WinSCP              | `6.3.6`（仅 sftp）                                    |
 
-### 性能测试
+### 测试
 
-这里有一份完整的自动化测试报告，展示了本项目的全部能力。[benchmark_report_zh-cn.md](https://github.com/Aimeast/FxSsh/blob/dev/benchmark_report_zh-cn.md)
+- `FxSsh.Tests` &mdash; 单元测试
+- `FxSsh.IntegrationTests` &mdash; 由真实 OpenSSH 客户端驱动的端到端测试
+
+CI 在每次推送到 `dev` 和每个 PR 时，于 Ubuntu 与 Windows 上运行这两套测试，把四份覆盖率文件合并为一份综合报告，并发布到工作流运行页面的摘要区（见 **Actions** 标签页）。完整的 HTML 报告可在该运行的 `coverage-report` 工件中下载。
 
 ### 示例代码
 
 ```cs
 static int windowWidth, windowHeight;
+static byte[] ptyModes;
 
 static void Main(string[] args)
 {
@@ -129,10 +133,6 @@ TA==
     server.AddHostKey("ecdsa-sha2-nistp384", ecdsap384Pem);
     server.AddHostKey("ecdsa-sha2-nistp521", ecdsap521Pem);
 
-    // --- 通过 AlgorithmSelection.ConfigureHazmat 插拔算法（issue #62）。
-    // ConfigureHazmat 是修改每服务器算法集的唯一入口，且必须在 Start()
-    // 之前调用（之后调用抛 InvalidOperationException）。最终生效的
-    // 算法套件会在启动时打印日志；协商到 Custom/Obsolete 条目时输出警告。
     server.Algorithms.ConfigureHazmat(catalog =>
     {
         // 1. 旧名称：别名直接复用内置工厂，无需编写新的密码学代码。
@@ -212,13 +212,6 @@ static void service_TcpForwardRequestReceived(object sender, TcpForwardRequestAr
     e.Accepted = allow;
 }
 
-/// <summary>
-/// 发起即忘记（fire-and-forget）的通道数据发送，吞掉通道销毁期间的异常。
-/// 下方的事件处理器是 async void（EventHandler&lt;T&gt;），因此 ForceClose
-/// 后任何从 Channel.SendDataAsync 逃逸的 ObjectDisposedException 都会落到
-/// 线程池上并导致整个进程 FailFast。一旦对端断开或会话关闭，出现销毁竞态
-/// 是预期行为。
-/// </summary>
 static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
 {
     try
@@ -234,10 +227,6 @@ static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
     }
 }
 
-/// <summary>
-/// 发起即忘记的 PTY 输入写入，吞掉销毁期间的异常
-/// （与 <see cref="TrySendChannelDataAsync"/> 的理由相同）。
-/// </summary>
 static async Task TryTerminalInputAsync(ITerminal terminal, ReadOnlyMemory<byte> data)
 {
     try
@@ -275,6 +264,7 @@ static void service_PtyReceived(object sender, PtyArgs e)
     Log.Info($"Request to create a PTY received for terminal type {e.Terminal}.");
     windowWidth = (int)e.WidthChars;
     windowHeight = (int)e.HeightRows;
+    ptyModes = e.Modes;
 }
 
 static void service_EnvReceived(object sender, EnvironmentArgs e)
@@ -315,9 +305,9 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
     if (e.ShellType == "shell")
     {
         // Windows：Win32 伪控制台（ConPTY，Windows 10 1809+）。
-        // Linux：devpts/ptmx（见 FxSsh.Services.Pty）。
+        // Linux：devpts/ptmx，通过 fork + exec（见 FxSsh.Services.Pty）。
         var shell = OperatingSystem.IsWindows() ? "cmd.exe" : "bash";
-        var terminal = TerminalFactory.Create(shell, windowWidth, windowHeight);
+        var terminal = TerminalFactory.Create(shell, windowWidth, windowHeight, ptyModes);
 
         e.Channel.WindowChange += (ss, ee) => terminal.Resize((int)ee.WidthColumns, (int)ee.HeightRows);
         e.Channel.DataReceived += async (ss, ee) => await TryTerminalInputAsync(terminal, ee);

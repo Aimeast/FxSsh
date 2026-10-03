@@ -182,3 +182,81 @@ jobs:
           name: combined-coverage
           path: combined.cobertura.xml
           retention-days: 7
+
+      - name: Install ReportGenerator
+        run: dotnet tool install -g dotnet-reportgenerator-globaltool
+
+      # MarkdownSummaryGithub renders the totals straight onto the run's
+      # summary page; the self-contained HTML report is uploaded for
+      # per-namespace / per-class drill-down.
+      - name: Generate coverage report
+        shell: bash
+        run: |
+          "$HOME/.dotnet/tools/reportgenerator" \
+            -reports:combined.cobertura.xml \
+            -targetdir:coverage-report \
+            -reporttypes:"HtmlInline;MarkdownSummaryGithub"
+
+      - name: Publish coverage summary
+        shell: bash
+        run: cat coverage-report/SummaryGithub.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: coverage-report
+          retention-days: 14
+
+  # Deploys the coverage job's already-generated report to GitHub Pages.
+  # This is an artifact deployment - it never commits to or pushes to any
+  # branch. The site also hosts the shields.io endpoint JSON that the
+  # README coverage badge reads.
+  coverage-pages:
+    name: Publish coverage report
+    runs-on: ubuntu-latest
+    needs: coverage
+    if: github.event_name == 'push' && github.ref == 'refs/heads/dev'
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - name: Download coverage report
+        uses: actions/download-artifact@v8
+        with:
+          name: coverage-report
+          path: site
+
+      - name: Download combined coverage
+        uses: actions/download-artifact@v8
+        with:
+          name: combined-coverage
+          path: coverage
+
+      - name: Write coverage badge JSON
+        shell: bash
+        run: |
+          PCT=$(python3 -c "import xml.etree.ElementTree as ET; r = ET.parse('coverage/combined.cobertura.xml').getroot(); c, v = int(r.get('lines-covered', 0)), int(r.get('lines-valid', 0)); print(round(100 * c / v) if v else 0)")
+          if [ "$PCT" -ge 90 ]; then COLOR=brightgreen
+          elif [ "$PCT" -ge 80 ]; then COLOR=green
+          elif [ "$PCT" -ge 70 ]; then COLOR=yellowgreen
+          elif [ "$PCT" -ge 50 ]; then COLOR=yellow
+          else COLOR=red
+          fi
+          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$PCT" "$COLOR" > site/coverage.json
+          cat site/coverage.json
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
