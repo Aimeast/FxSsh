@@ -40,7 +40,7 @@ namespace FxSsh.IntegrationTests.Integration
         {
             using var probe = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
             probe.Bind(new IPEndPoint(IPAddress.Loopback, 0));
-            return ((IPEndPoint)probe.LocalEndPoint).Port;
+            return ((IPEndPoint)probe.LocalEndPoint!).Port;
         }
 
         private static (string Command, string SkipReason) HeavyTrafficCommand()
@@ -146,8 +146,14 @@ namespace FxSsh.IntegrationTests.Integration
             var key = OpenSshClient.GenerateKeyPair(_tempDir);
             server.AcceptedFingerprints.Add("*");
 
+            // Bound but never listening, so connects to it are refused. Holding
+            // the port for the whole test also stops GetFreePort handing the
+            // same port out as remotePort, which would loop the forward back
+            // into the server's own listener.
+            using var deadTarget = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            deadTarget.Bind(new IPEndPoint(IPAddress.Loopback, 0));
+            var deadLocal = ((IPEndPoint)deadTarget.LocalEndPoint!).Port;
             var remotePort = GetFreePort();
-            var deadLocal = GetFreePort(); // nothing listens here
 
             var ssh = OpenSshClient.StartSsh(
                 $"{OpenSshClient.CommonOptions(server.Port, key)} -o BatchMode=yes -N -R 127.0.0.1:{remotePort}:127.0.0.1:{deadLocal} {OpenSshClient.Target(TestSshServer.Username)}");
