@@ -55,6 +55,7 @@ namespace FxSsh
         private readonly object _locker = new();
         private Socket _socket;
         private bool _disconnected;
+        private TaskCompletionSource _disconnectCompletion;
         private readonly Dictionary<string, string> _hostKey;
 
         // Async transport core. Raw socket bytes flow in through _receivePipe
@@ -251,19 +252,33 @@ namespace FxSsh
         /// message carrying <paramref name="description"/> is sent to the peer
         /// before the socket is shut down.
         /// </remarks>
-        public async Task DisconnectAsync(DisconnectReason reason = DisconnectReason.ByApplication, string description = "Connection terminated by the server.")
+        public Task DisconnectAsync(DisconnectReason reason = DisconnectReason.ByApplication, string description = "Connection terminated by the server.")
         {
-            bool runTeardown;
             lock (_locker)
             {
-                runTeardown = !_disconnected;
+                // Later callers get the first call's teardown task, so awaiting any
+                // DisconnectAsync means the socket is closed and Disconnected has fired.
+                if (_disconnected) return _disconnectCompletion?.Task ?? Task.CompletedTask;
                 _disconnected = true;
+                _disconnectCompletion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
             }
-            if (!runTeardown)
-            {
-                return;
-            }
+            return DisconnectCoreAsync(reason, description);
+        }
 
+        private async Task DisconnectCoreAsync(DisconnectReason reason, string description)
+        {
+            try
+            {
+                await TearDownAsync(reason, description);
+            }
+            finally
+            {
+                _disconnectCompletion.TrySetResult();
+            }
+        }
+
+        private async Task TearDownAsync(DisconnectReason reason, string description)
+        {
             _keepaliveTimer?.Dispose();
             _keepaliveTimer = null;
             _inactivityTimer?.Dispose();
@@ -276,6 +291,13 @@ namespace FxSsh
             }
 
             _sendChannel.Writer.TryComplete();
+
+            // Let the send pump hand the queued frames (the DISCONNECT above among them) to the
+            // socket before it is closed. Completion fires once the reader has drained the channel;
+            // a pump that already failed never completes it, hence the cap. A session that never
+            // started has no pump at all, so there is nothing to wait for.
+            if (_sessionCts is not null)
+                await Task.WhenAny(_sendChannel.Reader.Completion, Task.Delay(TimeSpan.FromMilliseconds(500)));
 
             if (_sessionCts is { IsCancellationRequested: false })
                 await _sessionCts.CancelAsync();
@@ -337,7 +359,9 @@ namespace FxSsh
                 while (!token.IsCancellationRequested)
                 {
                     var memory = _receivePipe.Writer.GetMemory(1024);
-                    var bytesRead = await _socket.ReceiveAsync(memory, SocketFlags.None, token);
+                    var socket = _socket;
+                    if (socket is null) break; // torn down by DisconnectAsync
+                    var bytesRead = await socket.ReceiveAsync(memory, SocketFlags.None, token);
                     if (bytesRead == 0) break;
 
                     // Raw inbound bytes are the finest-grained liveness signal
@@ -442,12 +466,21 @@ namespace FxSsh
                 {
                     using (payload)
                     {
+                        // DisconnectAsync nulls _socket from another task; read it once so a
+                        // buffer still queued at teardown (typically the DISCONNECT message
+                        // itself) ends the pump instead of dereferencing null.
+                        var socket = _socket;
+                        if (socket is null) break;
                         var memory = new ReadOnlyMemory<byte>(payload.Array, 0, payload.Length);
-                        await _socket.SendAsync(memory, SocketFlags.None, token);
+                        await socket.SendAsync(memory, SocketFlags.None, token);
                     }
                 }
             }
             catch (OperationCanceledException) { }
+            catch (Exception ex) when (_disconnected && ex is ObjectDisposedException or SocketException)
+            {
+                // The socket was closed by DisconnectAsync while a send was in flight: expected.
+            }
             catch (Exception ex)
             {
                 throw new SshConnectionException("Socket send operation failed.", DisconnectReason.ConnectionLost, ex);
