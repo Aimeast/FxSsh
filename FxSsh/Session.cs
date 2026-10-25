@@ -8,7 +8,6 @@ using System.Linq;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
@@ -372,14 +371,15 @@ namespace FxSsh
                 // Server banner is the first outbound frame; enqueue it ahead
                 // of the version read (matching the old SocketWriteProtocolVersion
                 // ordering).
-                var banner = Encoding.ASCII.GetBytes(ServerVersion + "\r\n");
-                var bannerBuf = SshBuffers.Packets.Rent(banner.Length);
-                banner.CopyTo(bannerBuf.AsSpan());
-                _sendChannel.Writer.TryWrite(new PooledBuffer(bannerBuf, banner.Length));
+                var bannerLength = Encoding.ASCII.GetByteCount(ServerVersion) + 2;
+                var bannerBuf = SshBuffers.Packets.Rent(bannerLength);
+                var versionLength = Encoding.ASCII.GetBytes(ServerVersion, bannerBuf);
+                "\r\n"u8.CopyTo(bannerBuf.AsSpan(versionLength));
+                _sendChannel.Writer.TryWrite(new PooledBuffer(bannerBuf, bannerLength));
 
                 ClientVersion = await ReadProtocolVersionAsync(token);
                 Log.Info($"Client version: {ClientVersion}.");
-                if (!Regex.IsMatch(ClientVersion, "SSH-2.0-.+"))
+                if (ClientVersion.Length <= 8 || !ClientVersion.StartsWith("SSH-2.0-", StringComparison.Ordinal))
                 {
                     Log.Warn($"Unsupported client SSH version: {ClientVersion}.");
                     throw new SshConnectionException(
@@ -1171,7 +1171,8 @@ namespace FxSsh
             if (SessionId == null)
             {
                 SessionId = exchangeHash;
-                Log.Info($"Key exchange complete, session id {BitConverter.ToString(exchangeHash).Replace("-", "").Substring(0, 16)}...");
+                if (Log.IsEnabled(LogLevel.Info))
+                    Log.Info($"Key exchange complete, session id {Convert.ToHexString(exchangeHash, 0, 8)}...");
             }
 
             _exchangeContext.NewAlgorithms = ComputeEncryption(kexAlg, hostKeyAlg, exchangeHash, clientCipher, serverCipher, clientHmac, serverHmac, sharedSecret);
@@ -1210,7 +1211,8 @@ namespace FxSsh
             if (SessionId == null)
             {
                 SessionId = exchangeHash;
-                Log.Info($"Key exchange complete, session id {BitConverter.ToString(exchangeHash).Replace("-", "").Substring(0, 16)}...");
+                if (Log.IsEnabled(LogLevel.Info))
+                    Log.Info($"Key exchange complete, session id {Convert.ToHexString(exchangeHash, 0, 8)}...");
             }
 
             _exchangeContext.NewAlgorithms = ComputeEncryption(kexAlg, hostKeyAlg, exchangeHash, clientCipher, serverCipher, clientHmac, serverHmac, sharedSecret);

@@ -169,16 +169,16 @@ namespace FxSsh.Messages
         protected override void OnGetPacket(SshDataWriter writer)
         {
             writer.WriteBytes(Cookie);
-            writer.Write(string.Join(",", KeyExchangeAlgorithms), Encoding.ASCII);
-            writer.Write(string.Join(",", ServerHostKeyAlgorithms), Encoding.ASCII);
-            writer.Write(string.Join(",", EncryptionAlgorithmsClientToServer), Encoding.ASCII);
-            writer.Write(string.Join(",", EncryptionAlgorithmsServerToClient), Encoding.ASCII);
-            writer.Write(string.Join(",", MacAlgorithmsClientToServer), Encoding.ASCII);
-            writer.Write(string.Join(",", MacAlgorithmsServerToClient), Encoding.ASCII);
-            writer.Write(string.Join(",", CompressionAlgorithmsClientToServer), Encoding.ASCII);
-            writer.Write(string.Join(",", CompressionAlgorithmsServerToClient), Encoding.ASCII);
-            writer.Write(string.Join(",", LanguagesClientToServer), Encoding.ASCII);
-            writer.Write(string.Join(",", LanguagesServerToClient), Encoding.ASCII);
+            writer.WriteNameList(KeyExchangeAlgorithms);
+            writer.WriteNameList(ServerHostKeyAlgorithms);
+            writer.WriteNameList(EncryptionAlgorithmsClientToServer);
+            writer.WriteNameList(EncryptionAlgorithmsServerToClient);
+            writer.WriteNameList(MacAlgorithmsClientToServer);
+            writer.WriteNameList(MacAlgorithmsServerToClient);
+            writer.WriteNameList(CompressionAlgorithmsClientToServer);
+            writer.WriteNameList(CompressionAlgorithmsServerToClient);
+            writer.WriteNameList(LanguagesClientToServer);
+            writer.WriteNameList(LanguagesServerToClient);
             writer.Write(FirstKexPacketFollows);
             writer.Write(Reserved);
 
