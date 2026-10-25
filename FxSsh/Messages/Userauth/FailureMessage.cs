@@ -24,7 +24,7 @@ namespace FxSsh.Messages.UserAuth
         /// </summary>
         protected override void OnGetPacket(SshDataWriter writer)
         {
-            writer.Write("password,publickey", Encoding.ASCII);
+            writer.WriteBinary("password,publickey"u8);
             writer.Write(false);
         }
     }

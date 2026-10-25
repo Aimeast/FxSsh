@@ -209,10 +209,40 @@ namespace FxSsh
             ArgumentNullException.ThrowIfNull(str);
             ArgumentNullException.ThrowIfNull(encoding);
 
-            // Encode straight into the reserved slot - no intermediate
-            // byte[] from encoding.GetBytes when the span overload exists.
+            // Encode straight into the reserved slot - no intermediate byte[].
             var byteCount = encoding.GetByteCount(str);
-            WriteBinaryCore(encoding.GetBytes(str).AsMemory(), byteCount);
+            Write((uint)byteCount);
+            encoding.GetBytes(str, Reserve(byteCount));
+            return this;
+        }
+
+        /// <summary>
+        /// Writes an SSH <c>name-list</c> (RFC 4251 section 5): a <c>uint32</c>
+        /// byte count followed by the comma-separated ASCII names.
+        /// </summary>
+        /// <param name="names">The names to write.</param>
+        /// <returns>This writer, to allow call chaining.</returns>
+        public SshDataWriter WriteNameList(string[] names)
+        {
+            ArgumentNullException.ThrowIfNull(names);
+
+            // ASCII is one byte per char, so the encoded size is known up front
+            // and the names go straight into the slot without a joined string.
+            var byteCount = Math.Max(0, names.Length - 1);
+            foreach (var name in names)
+                byteCount += name.Length;
+
+            Write((uint)byteCount);
+            var slot = Reserve(byteCount);
+            for (var i = 0; i < names.Length; i++)
+            {
+                if (i > 0)
+                {
+                    slot[0] = (byte)',';
+                    slot = slot[1..];
+                }
+                slot = slot[Encoding.ASCII.GetBytes(names[i], slot)..];
+            }
             return this;
         }
 
@@ -269,20 +299,21 @@ namespace FxSsh
         /// </summary>
         /// <param name="data">The payload bytes to write.</param>
         /// <returns>This writer, to allow call chaining.</returns>
-        public SshDataWriter WriteBinary(ReadOnlyMemory<byte> data)
-        {
-            WriteBinaryCore(data, data.Length);
-            return this;
-        }
+        public SshDataWriter WriteBinary(ReadOnlyMemory<byte> data) => WriteBinary(data.Span);
 
-        // Shared path for Write(string) and WriteBinary: emit length prefix
-        // then copy payload. `byteCount` is the payload length to prefix;
-        // it equals data.Length for WriteBinary and the encoded length for
-        // Write(string).
-        private void WriteBinaryCore(ReadOnlyMemory<byte> data, int byteCount)
+        /// <summary>
+        /// Writes a length-prefixed binary blob: a <c>uint32</c> byte count
+        /// followed by the bytes of <paramref name="data"/>. Also writes a
+        /// constant SSH <c>string</c> from a UTF-8 literal (<c>"name"u8</c>)
+        /// without any encoding step.
+        /// </summary>
+        /// <param name="data">The payload bytes to write.</param>
+        /// <returns>This writer, to allow call chaining.</returns>
+        public SshDataWriter WriteBinary(ReadOnlySpan<byte> data)
         {
-            Write((uint)byteCount);
-            data.Span.CopyTo(Reserve(byteCount));
+            Write((uint)data.Length);
+            data.CopyTo(Reserve(data.Length));
+            return this;
         }
 
         /// <summary>

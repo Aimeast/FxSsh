@@ -53,7 +53,7 @@ namespace FxSsh.Messages.Connection
         /// <param name="writer">The writer used to serialize the message payload.</param>
         protected override void OnGetPacket(SshDataWriter writer)
         {
-            writer.Write("forwarded-tcpip", Encoding.ASCII);
+            writer.WriteBinary("forwarded-tcpip"u8);
             writer.Write(SenderChannel);
             writer.Write(InitialWindowSize);
             writer.Write(MaximumPacketSize);
