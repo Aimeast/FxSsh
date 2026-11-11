@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO.Pipelines;
 using System.Linq;
+using System.Net;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
@@ -133,6 +134,13 @@ namespace FxSsh
         public byte[] SessionId { get; private set; }
 
         /// <summary>
+        /// Gets the client's address and port, captured from the accepted
+        /// socket when the session is constructed, so it stays available
+        /// after the session disconnects.
+        /// </summary>
+        public EndPoint RemoteEndPoint { get; }
+
+        /// <summary>
         /// Gets the registered service instance of type
         /// <typeparamref name="T"/>, or null when no such service has been
         /// registered for this session yet.
@@ -156,6 +164,7 @@ namespace FxSsh
 
             Id = Interlocked.Increment(ref _nextId);
             _socket = socket;
+            RemoteEndPoint = socket.RemoteEndPoint;
             _hostKey = hostKey.ToDictionary(s => s.Key, s => s.Value);
             ServerVersion = serverBanner;
 

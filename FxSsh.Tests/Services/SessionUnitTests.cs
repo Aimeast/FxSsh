@@ -42,6 +42,20 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public void RemoteEndPoint_is_the_client_and_outlives_the_socket()
+        {
+            var (client, server) = CreateSocketPair();
+            var session = new Session(server, new Dictionary<string, string>(), "SSH-2.0-X");
+
+            Assert.AreEqual(client.LocalEndPoint, session.RemoteEndPoint);
+            session.Disconnect();
+            Assert.AreEqual(client.LocalEndPoint, session.RemoteEndPoint);
+
+            client.Dispose();
+            server.Dispose();
+        }
+
+        [TestMethod]
         public async Task StartAsync_on_a_disconnected_socket_returns_immediately()
         {
             var (client, server) = CreateSocketPair();
