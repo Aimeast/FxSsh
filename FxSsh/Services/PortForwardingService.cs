@@ -141,10 +141,6 @@ namespace FxSsh.Services
         /// </summary>
         private async Task BridgeAsync(Channel channel, Socket socket)
         {
-            Log.Debug($"Bridge established: channel {channel.ServerChannelId} <-> {socket.RemoteEndPoint}.");
-            lock (_bridgeLocker)
-                _bridges.Add((channel, socket));
-
             // The channel DataReceived callback runs on the SSH
             // ConnectionService.MessageLoop task. The queue is bounded
             // (FullMode.Wait), so a blocking Write here is the intended
@@ -167,27 +163,54 @@ namespace FxSsh.Services
                 FullMode = BoundedChannelFullMode.Wait,
             });
 
+            // Shut down gracefully (FIN) before closing: a bare Close
+            // can surface as RST on the peer, which aborts forwarded
+            // connections mid data.
+            void ReleaseSocket()
+            {
+                try { socket.Shutdown(SocketShutdown.Both); } catch { }
+                try { socket.Close(); } catch { }
+            }
+
+            // A force-closed channel (e.g. the peer rejected the forwarded
+            // open) will never see a CHANNEL_CLOSE exchange - release the
+            // bridged socket so the pump ends instead of lingering forever.
+            // Subscribe before anything else can observe the channel: the
+            // peer's CHANNEL_OPEN_FAILURE is processed on the message loop
+            // and may land before this task even gets scheduled, and
+            // ForceClose fires the event synchronously - subscribing later
+            // would miss it.
+            var forceClosed = false;
+            channel.ForceClosed += (_, _) =>
+            {
+                forceClosed = true;
+                sendQueue.Writer.TryComplete();
+                ReleaseSocket();
+            };
+
+            if (channel.IsForceClosed)
+            {
+                // The open was rejected before the subscription above
+                // existed, so the handler never ran. Release the socket and
+                // skip the bridge entirely; nothing may be written on the
+                // channel because the peer already removed it, and newer
+                // OpenSSH clients answer packets for a nonexistent channel
+                // with a protocol-error disconnect.
+                Log.Debug($"Forwarded channel {channel.ServerChannelId} rejected before bridging; dropping the accepted socket.");
+                ReleaseSocket();
+                return;
+            }
+
+            Log.Debug($"Bridge established: channel {channel.ServerChannelId} <-> {socket.RemoteEndPoint}.");
+            lock (_bridgeLocker)
+                _bridges.Add((channel, socket));
+
             channel.DataReceived += (_, data) =>
             {
                 var owned = new PooledMemoryOwner(data.Length);
                 data.Span.CopyTo(owned.Memory.Span);
                 try { sendQueue.Writer.WriteAsync(owned).AsTask().GetAwaiter().GetResult(); }
                 catch { owned.Dispose(); }
-            };
-
-            // A force-closed channel (e.g. the peer rejected the forwarded
-            // open) will never see a CHANNEL_CLOSE exchange - release the
-            // bridged socket so the pump ends instead of lingering forever.
-            var forceClosed = false;
-            channel.ForceClosed += (_, _) =>
-            {
-                forceClosed = true;
-                sendQueue.Writer.TryComplete();
-                // Shut down gracefully (FIN) before closing: a bare Close
-                // can surface as RST on the peer, which aborts forwarded
-                // connections mid data.
-                try { socket.Shutdown(SocketShutdown.Both); } catch { }
-                try { socket.Close(); } catch { }
             };
 
             channel.CloseReceived += (_, _) =>

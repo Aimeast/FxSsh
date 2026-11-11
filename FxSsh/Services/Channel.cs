@@ -177,6 +177,13 @@ namespace FxSsh.Services
         public bool ServerClosed { get; private set; }
         /// <summary>Gets a value indicating whether this server has sent SSH_MSG_CHANNEL_EOF.</summary>
         public bool ServerMarkedEof { get; private set; }
+        /// <summary>
+        /// Gets a value indicating whether the channel was force-closed (peer
+        /// rejected the open, session teardown, or both sides closed). Reads
+        /// the flag outside any lock, so a late reader may observe it one
+        /// message-loop turn after the teardown.
+        /// </summary>
+        public bool IsForceClosed => _forceClosed;
 
         /// <summary>Occurs when channel data arrives from the peer (SSH_MSG_CHANNEL_DATA, RFC 4254 section 5.2).</summary>
         public event EventHandler<ReadOnlyMemory<byte>> DataReceived;
@@ -396,11 +403,14 @@ namespace FxSsh.Services
         /// <summary>
         /// Sends SSH_MSG_CHANNEL_EOF (RFC 4254 section 5.3) to tell the peer
         /// that no more data will be written to this channel. Has no effect
-        /// once this server has already marked EOF.
+        /// once this server has already marked EOF or the channel was
+        /// force-closed: the peer has already removed a rejected channel,
+        /// and newer OpenSSH clients answer packets for a nonexistent
+        /// channel with a protocol-error disconnect.
         /// </summary>
         public void SendEof()
         {
-            if (ServerMarkedEof)
+            if (ServerMarkedEof || _forceClosed)
                 return;
 
             ServerMarkedEof = true;
