@@ -3,8 +3,7 @@
 namespace FxSsh
 {
     /// <summary>
-    /// Provides helpers for generating host keys in PEM form and converting
-    /// legacy RSA key blobs, as accepted by
+    /// Provides helpers for generating host keys in PEM form as accepted by
     /// <see cref="SshServer.AddHostKey(string, string)"/>.
     /// </summary>
     public static class Ed25519KeyGeneratorExtensions
