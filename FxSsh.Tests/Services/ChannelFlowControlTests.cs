@@ -2,8 +2,10 @@
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Threading.Tasks;
 using FxSsh;
+using FxSsh.Messages.Connection;
 using FxSsh.Services;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -61,6 +63,13 @@ namespace FxSsh.Tests.Services
             Assert.IsFalse(channel.PendingConfirmation);
             Assert.IsFalse(channel.ClientClosed);
             Assert.IsFalse(channel.ServerClosed);
+        }
+
+        [TestMethod]
+        public void Constructor_rejects_a_zero_peer_packet_size()
+        {
+            Assert.ThrowsExactly<ArgumentOutOfRangeException>(
+                () => new SessionChannel(_connection, 1, 1000, 0, 1000));
         }
 
         [TestMethod]
@@ -123,6 +132,30 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public void ForceClose_isolates_a_throwing_handler_and_still_unregisters_the_channel()
+        {
+            // Regression: a ForceClosed subscriber that throws used to skip
+            // both the remaining subscribers and RemoveChannel, so bridges
+            // kept their external sockets and the closed channel stayed
+            // registered for the rest of the session.
+            var channel = new SessionChannel(_connection, 1, 1000, 32768, 1000);
+            var laterHandlers = 0;
+            channel.ForceClosed += (_, _) => throw new InvalidOperationException("host handler failure");
+            channel.ForceClosed += (_, _) => laterHandlers++;
+
+            var channels = (Dictionary<uint, Channel>)typeof(ConnectionService)
+                .GetField("_channels", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(_connection)!;
+            channels[channel.ServerChannelId] = channel;
+
+            channel.ForceClose(); // must not surface the subscriber failure
+
+            Assert.AreEqual(1, laterHandlers, "a throwing subscriber must not skip the remaining subscribers");
+            Assert.IsFalse(channels.ContainsKey(channel.ServerChannelId),
+                "the closed channel must still be unregistered from the connection service");
+        }
+
+        [TestMethod]
         public void OnData_refreshes_the_local_window_at_half_threshold()
         {
             var channel = new SessionChannel(_connection, 1, 1000, 32768, 1000);
@@ -143,6 +176,74 @@ namespace FxSsh.Tests.Services
             }
 
             Assert.IsTrue(refreshed, "the local window was never refreshed");
+        }
+
+        [TestMethod]
+        public async Task SendCloseAsync_waits_for_the_in_flight_send_before_closing()
+        {
+            var channel = new SessionChannel(_connection, 1, 100, 32768, 1000);
+            channel.SendData(new byte[100]); // exhausts the peer window
+
+            var pending = channel.SendDataAsync(new byte[10]);
+            await Task.Delay(100);
+            Assert.IsFalse(pending.IsCompleted, "the send must park on the exhausted window");
+
+            var close = channel.SendCloseAsync();
+            await Task.Delay(100);
+            Assert.IsFalse(close.IsCompleted,
+                "CLOSE must queue behind the send that already owns the send gate");
+
+            channel.ClientAdjustWindow(10);
+            await pending.WaitAsync(TimeSpan.FromSeconds(5));
+            await close.WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.IsTrue(channel.ServerClosed);
+        }
+
+        [TestMethod]
+        public void Backlog_over_the_cap_is_rejected_before_confirmation()
+        {
+            // A channel still awaiting OPEN_CONFIRMATION copies every send
+            // into its backlog; the per-channel cap bounds that queue.
+            var pending = new PendingChannel(_connection, serverChannelId: 9);
+            var chunk = new byte[1024 * 1024];
+            var attempts = pending.MaximumBufferedSendBytes / chunk.Length;
+
+            for (var i = 0; i < attempts; i++)
+                pending.SendData(chunk); // completes by queueing
+
+            Assert.ThrowsExactly<InvalidOperationException>(() => pending.SendData(chunk));
+
+            pending.ForceClose();
+        }
+
+        [TestMethod]
+        public async Task SendDataAsync_larger_than_the_cap_streams_when_the_window_allows()
+        {
+            // A direct send streams chunk-by-chunk from the caller's buffer,
+            // so a payload larger than the per-channel cap is not rejected up
+            // front; it only parks when the peer window is exhausted.
+            var channel = new SessionChannel(_connection, 1, 0, 32768, 1000);
+            var pending = channel.SendDataAsync(new byte[channel.MaximumBufferedSendBytes + 1]);
+            await Task.Delay(100);
+            Assert.IsFalse(pending.IsCompleted, "the oversized call must park on the zero window, not fail");
+
+            channel.ClientAdjustWindow((uint)channel.MaximumBufferedSendBytes + 1);
+            await pending.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        [TestMethod]
+        public void Close_and_eof_after_force_close_are_no_ops()
+        {
+            var channel = new SessionChannel(_connection, 1, 1000, 32768, 1000);
+            channel.ForceClose();
+
+            channel.SendClose();
+            channel.SendEof();
+            channel.SendSignalClose("TERM");
+
+            Assert.IsFalse(channel.ServerClosed);
+            Assert.IsFalse(channel.ServerMarkedEof);
         }
 
         [TestMethod]
@@ -223,6 +324,29 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public void Eof_and_close_requested_before_confirmation_are_deferred()
+        {
+            var pendingEof = new PendingChannel(_connection, serverChannelId: 9);
+            pendingEof.SendData(new byte[10]);
+            pendingEof.SendEof();
+            Assert.IsFalse(pendingEof.ServerMarkedEof,
+                "EOF must not overtake data buffered before OPEN_CONFIRMATION");
+
+            pendingEof.OnConfirmed(7, peerInitialWindowSize: 500, peerMaximumPacketSize: 300);
+            Assert.IsTrue(pendingEof.ServerMarkedEof);
+
+            var pendingClose = new PendingChannel(_connection, serverChannelId: 11);
+            pendingClose.SendData(new byte[10]);
+            pendingClose.SendClose(3);
+            Assert.IsFalse(pendingClose.ServerClosed,
+                "CLOSE must not overtake data buffered before OPEN_CONFIRMATION");
+
+            pendingClose.OnConfirmed(8, peerInitialWindowSize: 500, peerMaximumPacketSize: 300);
+            Assert.IsTrue(pendingClose.ServerClosed);
+            Assert.AreEqual(490u, pendingClose.ClientWindowSize);
+        }
+
+        [TestMethod]
         public async Task SendDataAsync_racing_confirmation_still_sends()
         {
             // The pump may call SendDataAsync concurrently with the session
@@ -235,6 +359,112 @@ namespace FxSsh.Tests.Services
                 pending.OnConfirmed(1, peerInitialWindowSize: 2097152, peerMaximumPacketSize: 32768);
                 await sendTask.WaitAsync(TimeSpan.FromSeconds(5));
             }
+        }
+
+        [TestMethod]
+        public void Deferred_close_goes_out_after_the_remainder_missed_by_the_initial_flush()
+        {
+            // The producer queued more than the peer's initial window before
+            // OPEN_CONFIRMATION, and a close was requested while pending: the
+            // flush only sends what fits, so the CLOSE must stay deferred
+            // until WINDOW_ADJUST releases the remainder - otherwise the
+            // queued CHANNEL_DATA would follow the CLOSE on the wire.
+            var pending = new PendingChannel(_connection, serverChannelId: 9);
+            pending.SendData(new byte[100]);
+            pending.SendClose();
+
+            pending.OnConfirmed(7, peerInitialWindowSize: 60, peerMaximumPacketSize: 300);
+            Assert.IsFalse(pending.ServerClosed,
+                "CLOSE must stay deferred while queued data missed the initial window");
+            CollectionAssert.AreEqual(
+                new[] { ChannelDataMessage.MessageNumber },
+                DrainSentMessageTypes(_session),
+                "only the part fitting the initial window may be sent before the adjust");
+
+            pending.ClientAdjustWindow(40);
+            Assert.IsTrue(pending.ServerClosed);
+            Assert.AreEqual(0u, pending.ClientWindowSize);
+            CollectionAssert.AreEqual(
+                new[] { ChannelDataMessage.MessageNumber, ChannelCloseMessage.MessageNumber },
+                DrainSentMessageTypes(_session),
+                "the CLOSE must follow the last queued data byte on the wire");
+        }
+
+        [TestMethod]
+        public async Task SendCloseAsync_after_confirmation_waits_for_the_window_blocked_remainder()
+        {
+            var pending = new PendingChannel(_connection, serverChannelId: 9);
+            pending.SendData(new byte[100]);
+            pending.OnConfirmed(7, peerInitialWindowSize: 60, peerMaximumPacketSize: 300);
+            Assert.AreEqual(0u, pending.ClientWindowSize); // 40 bytes still queued
+
+            var close = pending.SendCloseAsync();
+            await Task.Delay(100);
+            // SendCloseAsync completes as soon as the request is recorded
+            // (same as the pre-confirmation deferral); the meaningful check
+            // is that the CLOSE frame itself stays unsent.
+            Assert.IsFalse(pending.ServerClosed, "CLOSE must wait for the queued remainder to drain");
+
+            pending.ClientAdjustWindow(40);
+            await close.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.IsTrue(pending.ServerClosed);
+
+            CollectionAssert.AreEqual(
+                new[] { ChannelDataMessage.MessageNumber, ChannelDataMessage.MessageNumber, ChannelCloseMessage.MessageNumber },
+                DrainSentMessageTypes(_session),
+                "every queued data byte must precede the CLOSE");
+        }
+
+        [TestMethod]
+        public void Deferred_eof_goes_out_after_the_remainder_missed_by_the_initial_flush()
+        {
+            var pending = new PendingChannel(_connection, serverChannelId: 9);
+            pending.SendData(new byte[100]);
+            pending.SendEof();
+
+            pending.OnConfirmed(7, peerInitialWindowSize: 60, peerMaximumPacketSize: 300);
+            Assert.IsFalse(pending.ServerMarkedEof, "EOF must wait for the queued remainder");
+
+            pending.ClientAdjustWindow(40);
+            Assert.IsTrue(pending.ServerMarkedEof);
+            Assert.AreEqual(0u, pending.ClientWindowSize);
+        }
+
+        /// <summary>
+        /// Drain the session's outbound queue (the session is never started,
+        /// so frames stay plaintext) and return the SSH message number of
+        /// each queued frame in order - payload byte 0, at wire offset 5 of
+        /// the [length(4)][padding_length(1)][payload] frame.
+        /// </summary>
+        private static List<byte> DrainSentMessageTypes(Session session)
+        {
+            var channel = session.GetType()
+                .GetField("_sendChannel", BindingFlags.NonPublic | BindingFlags.Instance)!
+                .GetValue(session)!;
+            var reader = channel.GetType().GetProperty("Reader")!.GetValue(channel)!;
+            var tryRead = reader.GetType().GetMethod("TryRead")!;
+
+            var messageNumbers = new List<byte>();
+            var arguments = new object?[1];
+            while ((bool)tryRead.Invoke(reader, arguments)! && arguments[0] != null)
+            {
+                var buffer = arguments[0]!;
+                var bufferType = buffer.GetType();
+                var array = (byte[])bufferType
+                    .GetProperty("Array", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)!
+                    .GetValue(buffer)!;
+                var length = (int)bufferType
+                    .GetProperty("Length", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)!
+                    .GetValue(buffer)!;
+
+                Assert.IsTrue(length >= 6, "a queued frame must carry at least one payload byte");
+                messageNumbers.Add(array[5]);
+
+                bufferType.GetMethod("Dispose", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)!
+                    .Invoke(buffer, null);
+            }
+
+            return messageNumbers;
         }
 
         private sealed class PendingChannel : Channel

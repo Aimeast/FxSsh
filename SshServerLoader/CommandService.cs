@@ -29,6 +29,14 @@ namespace SshServerLoader
         };
 
         private readonly Channel<byte[]> _stdinChannel = Channel.CreateBounded<byte[]>(StdinChannelOptions);
+        private readonly object _writeLocker = new();
+        private Task _pendingWrites = Task.CompletedTask;
+        private long _pendingBytes;
+
+        // Cap on bytes accepted from SSH but not yet written to the child's
+        // stdin. The bounded channel alone does not bound the serialized wait
+        // chain in front of it.
+        private const int MaximumPendingBytes = 8 * 1024 * 1024;
 
         public CommandService(string command, string args)
         {
@@ -55,34 +63,62 @@ namespace SshServerLoader
 
         /// <summary>
         /// Queue SSH channel input for the child's stdin. Called on the SSH
-        /// ConnectionService message loop task. The queue is bounded
-        /// (FullMode.Wait), so a blocking Write here is the intended
-        /// backpressure path: if the child stops reading stdin, the message
-        /// loop task pauses, which stops replenishing the SSH receive window
-        /// and throttles the client. OnClose completes the queue, unblocking
-        /// any pending write. The slice is copied because the async writer
-        /// consumes it after the SSH receive buffer has been recycled.
+        /// ConnectionService message loop task, so it must never block: a
+        /// blocking write would prevent the same loop from delivering the
+        /// WINDOW_ADJUST that drains the opposite direction and deadlock a
+        /// full-duplex stream. The copy is queued behind a serialized chain
+        /// and bounded by <see cref="MaximumPendingBytes"/>; overflow closes
+        /// stdin instead of growing memory.
         /// </summary>
         public void OnData(ReadOnlyMemory<byte> data)
         {
+            if (data.Length == 0)
+                return;
+
+            if (Interlocked.Add(ref _pendingBytes, data.Length) > MaximumPendingBytes)
+            {
+                Interlocked.Add(ref _pendingBytes, -data.Length);
+                OnClose();
+                return;
+            }
+
+            var copy = data.ToArray();
+            lock (_writeLocker)
+            {
+                _pendingWrites = QueueAfterAsync(_pendingWrites, copy, data.Length);
+            }
+        }
+
+        private async Task QueueAfterAsync(Task previous, byte[] data, int length)
+        {
+            try { await previous.ConfigureAwait(false); } catch { }
+
             try
             {
-                // Synchronous wait on the bounded channel: the message loop
-                // task has no SynchronizationContext, so GetAwaiter().GetResult()
-                // safely blocks until the stdin writer frees a slot
-                // (backpressure) or the queue is completed (teardown).
-                _stdinChannel.Writer.WriteAsync(data.ToArray()).AsTask().GetAwaiter().GetResult();
-            }
-            catch (ChannelClosedException)
-            {
+                await _stdinChannel.Writer.WriteAsync(data).ConfigureAwait(false);
             }
             catch
             {
+                // Channel completed during teardown.
+            }
+            finally
+            {
+                Interlocked.Add(ref _pendingBytes, -length);
             }
         }
 
         public void OnClose()
         {
+            Task pending;
+            lock (_writeLocker)
+                pending = _pendingWrites;
+
+            _ = CompleteAfterAsync(pending);
+        }
+
+        private async Task CompleteAfterAsync(Task pending)
+        {
+            try { await pending.ConfigureAwait(false); } catch { }
             _stdinChannel.Writer.TryComplete();
             try { _process.StandardInput.BaseStream.Close(); } catch { }
         }

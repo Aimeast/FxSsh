@@ -94,13 +94,14 @@ namespace FxSsh.IntegrationTests.Infrastructure
 
         public static string Target(string username) => $"{username}@127.0.0.1";
 
-        /// <summary>Generate a fresh ECDSA key pair; returns the private key path.</summary>
-        public static string GenerateKeyPair(string directory)
+        /// <summary>Generate a fresh key pair of the requested type; returns the private key path.</summary>
+        public static string GenerateKeyPair(string directory, string keyType = "ecdsa", int? bits = null)
         {
-            var keyPath = Path.Combine(directory, "test_key");
-            var result = RunProcess(SshKeygenPath, $"-t ecdsa -b 256 -N \"\" -f \"{keyPath}\" -C fxssh-integration-test", timeoutMs: 30_000);
+            var keyPath = Path.Combine(directory, "test_key_" + keyType);
+            var size = bits.HasValue ? $" -b {bits.Value}" : string.Empty;
+            var result = RunProcess(SshKeygenPath, $"-t {keyType}{size} -N \"\" -f \"{keyPath}\" -C fxssh-integration-test", timeoutMs: 30_000);
             if (result.ExitCode != 0)
-                throw new InvalidOperationException($"ssh-keygen failed: {result.StandardError}");
+                throw new InvalidOperationException($"ssh-keygen ({keyType}) failed: {result.StandardError}");
 
             return keyPath;
         }
@@ -137,6 +138,67 @@ namespace FxSsh.IntegrationTests.Infrastructure
 
         public static RunResult Ssh(string arguments, IReadOnlyDictionary<string, string>? environment = null, string? stdin = null, int timeoutMs = 60_000, string? workingDirectory = null)
             => RunProcess(SshPath, arguments, environment, stdin, timeoutMs, workingDirectory);
+
+        /// <summary>
+        /// Run ssh with a raw byte stdin/stdout path. Text helpers decode as
+        /// UTF-8, which corrupts binary channel streams; transport tests
+        /// hash and compare the exact bytes instead.
+        /// </summary>
+        public static (int ExitCode, byte[] StandardOutput, string StandardError) SshBinary(
+            string arguments,
+            byte[]? stdin = null,
+            int timeoutMs = 120_000)
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = SshPath,
+                Arguments = arguments,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                RedirectStandardInput = stdin != null,
+                CreateNoWindow = true,
+            };
+
+            using var process = Process.Start(psi) ?? throw new InvalidOperationException("failed to start ssh");
+            using var output = new MemoryStream();
+
+            var readOutput = process.StandardOutput.BaseStream.CopyToAsync(output);
+            var readError = process.StandardError.ReadToEndAsync();
+            var writeInput = stdin == null
+                ? Task.CompletedTask
+                : Task.Run(async () =>
+                {
+                    try
+                    {
+                        await process.StandardInput.BaseStream.WriteAsync(stdin).ConfigureAwait(false);
+                        await process.StandardInput.BaseStream.FlushAsync().ConfigureAwait(false);
+                    }
+                    catch (IOException)
+                    {
+                        // ssh exited before consuming all input; the exit code
+                        // and stderr below explain why.
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+                    finally
+                    {
+                        try { process.StandardInput.Close(); } catch { }
+                    }
+                });
+
+            if (!process.WaitForExit(timeoutMs))
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                throw new TimeoutException($"ssh {arguments} did not finish within {timeoutMs} ms");
+            }
+
+            writeInput.GetAwaiter().GetResult();
+            readOutput.GetAwaiter().GetResult();
+            var error = readError.GetAwaiter().GetResult();
+            return (process.ExitCode, output.ToArray(), error);
+        }
 
         /// <summary>Start a long-running ssh command (e.g. port forwarding) and return the process.</summary>
         public static Process StartSsh(string arguments, IReadOnlyDictionary<string, string>? environment = null)

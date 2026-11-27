@@ -1,5 +1,4 @@
 ﻿using System;
-using System.Buffers;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
@@ -35,7 +34,7 @@ namespace FxSsh.Services
         private readonly CancellationTokenSource _cts = new();
         private readonly List<(Channel channel, Socket socket)> _bridges = [];
         private readonly object _bridgeLocker = new();
-        private bool _disposed;
+        private int _disposed;
 
         /// <summary>Bound host the listener actually used (may differ from requested when host was empty).</summary>
         public string BoundAddress { get; }
@@ -96,8 +95,25 @@ namespace FxSsh.Services
                         client = await _listener.AcceptSocketAsync(_cts.Token);
                     }
                     catch (OperationCanceledException) { break; }
-                    catch (SocketException) { break; }   // listener stopped
                     catch (ObjectDisposedException) { break; }
+                    catch (SocketException ex)
+                    {
+                        if (_cts.IsCancellationRequested)
+                            break;
+
+                        // A transient accept failure (for example EMFILE)
+                        // must not permanently disable the listener.
+                        Log.Warn($"Forwarding accept failed for {BoundAddress}:{BoundPort}: {ex.Message}");
+                        try
+                        {
+                            await Task.Delay(100, _cts.Token).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            break;
+                        }
+                        continue;
+                    }
 
                     var remote = (IPEndPoint)client.RemoteEndPoint;
 
@@ -129,7 +145,11 @@ namespace FxSsh.Services
             }
             catch (ObjectDisposedException)
             {
-                // Dispose() released the CTS while this loop was polling it.
+                // Dispose() stopped the listener while this loop was waiting.
+            }
+            catch (Exception ex)
+            {
+                Log.Fail($"Forwarding accept loop failed for {BoundAddress}:{BoundPort}: {ex.Message}");
             }
         }
 
@@ -137,39 +157,49 @@ namespace FxSsh.Services
         /// Wire a forwarded channel to a socket with two async pumps:
         /// channel->socket (send queue consumed by an async sender) and
         /// socket->channel (async receive loop feeding Channel.SendDataAsync).
-        /// No thread is blocked on socket I/O.
+        /// No thread is blocked on socket I/O, and no path blocks the SSH
+        /// message loop: when the local TCP peer cannot keep up, the bounded
+        /// queue is full and the bridge is torn down instead of stalling the
+        /// whole session.
         /// </summary>
         private async Task BridgeAsync(Channel channel, Socket socket)
         {
             // The channel DataReceived callback runs on the SSH
-            // ConnectionService.MessageLoop task. The queue is bounded
-            // (FullMode.Wait), so a blocking Write here is the intended
-            // backpressure path: when the local TCP peer is slow, the
-            // message loop task pauses, which stops replenishing the SSH
-            // receive window and throttles the client's TCP send buffer,
-            // instead of growing the queue without limit.
+            // ConnectionService.MessageLoop task. The incoming
+            // ReadOnlyMemory is a slice over the SSH receive buffer, which is
+            // recycled by the next ReceiveMessage, so the bytes are copied
+            // into an ArrayPool rental owned by PooledMemoryOwner and disposed
+            // by the send pump after SendAsync.
             //
-            // The incoming ReadOnlyMemory is a slice over the SSH receive
-            // buffer, which is recycled by the next ReceiveMessage on the
-            // message-loop task, so we MUST hand the send pump an independent
-            // copy. Instead of ToArray()'ing a fresh byte[] per packet (the
-            // forwarding hot path's last heap allocation), the copy is made
-            // into an ArrayPool rental owned by PooledMemoryOwner, which the
-            // send pump disposes after SendAsync - the rental is reused
-            // across packets instead of hitting Gen0.
-            var sendQueue = System.Threading.Channels.Channel.CreateBounded<IMemoryOwner<byte>>(new BoundedChannelOptions(16)
+            // The queue is bounded and TryWrite is non-blocking: a slow local
+            // TCP peer must not freeze the single SSH message loop (which
+            // would stall every other channel too). Data is queued through a
+            // serialized pending chain because the SSH window is replenished
+            // as soon as OnData returns; the chain's bytes are capped below so
+            // a stalled local socket cannot grow it without bound.
+            const int MaximumPendingBytes = 8 * 1024 * 1024;
+            var pendingBytes = 0L;
+            var sendQueue = System.Threading.Channels.Channel.CreateBounded<ChannelDataLease>(new BoundedChannelOptions(16)
             {
                 SingleReader = true,
                 FullMode = BoundedChannelFullMode.Wait,
             });
 
-            // Shut down gracefully (FIN) before closing: a bare Close
-            // can surface as RST on the peer, which aborts forwarded
-            // connections mid data.
-            void ReleaseSocket()
+            var bridgeClosed = 0;
+            void CloseBridge(bool closeChannel = false)
             {
+                if (Interlocked.Exchange(ref bridgeClosed, 1) != 0)
+                    return;
+
+                sendQueue.Writer.TryComplete();
                 try { socket.Shutdown(SocketShutdown.Both); } catch { }
                 try { socket.Close(); } catch { }
+                if (closeChannel)
+                {
+                    // Overload abort: tell the peer the channel is gone
+                    // instead of leaving it half-open until session teardown.
+                    _ = CloseChannelAsync(channel);
+                }
             }
 
             // A force-closed channel (e.g. the peer rejected the forwarded
@@ -180,13 +210,7 @@ namespace FxSsh.Services
             // and may land before this task even gets scheduled, and
             // ForceClose fires the event synchronously - subscribing later
             // would miss it.
-            var forceClosed = false;
-            channel.ForceClosed += (_, _) =>
-            {
-                forceClosed = true;
-                sendQueue.Writer.TryComplete();
-                ReleaseSocket();
-            };
+            channel.ForceClosed += (_, _) => CloseBridge();
 
             if (channel.IsForceClosed)
             {
@@ -197,36 +221,106 @@ namespace FxSsh.Services
                 // OpenSSH clients answer packets for a nonexistent channel
                 // with a protocol-error disconnect.
                 Log.Debug($"Forwarded channel {channel.ServerChannelId} rejected before bridging; dropping the accepted socket.");
-                ReleaseSocket();
+                CloseBridge();
                 return;
             }
 
             Log.Debug($"Bridge established: channel {channel.ServerChannelId} <-> {socket.RemoteEndPoint}.");
             lock (_bridgeLocker)
-                _bridges.Add((channel, socket));
-
-            channel.DataReceived += (_, data) =>
             {
-                var owned = new PooledMemoryOwner(data.Length);
-                data.Span.CopyTo(owned.Memory.Span);
-                try { sendQueue.Writer.WriteAsync(owned).AsTask().GetAwaiter().GetResult(); }
-                catch { owned.Dispose(); }
+                if (Volatile.Read(ref _disposed) != 0)
+                {
+                    try { socket.Close(); } catch { }
+                    return;
+                }
+                _bridges.Add((channel, socket));
+            }
+
+            // Queue writes asynchronously and in order. The bounded channel
+            // absorbs the interval before the send pump drains a chunk; the
+            // pending-bytes cap bounds everything that has been accepted from
+            // SSH but not yet handed to the local socket.
+            var sendLocker = new object();
+            var pendingSend = Task.CompletedTask;
+
+            async Task EnqueueAfterAsync(Task previous, ChannelDataLease lease, int length)
+            {
+                try { await previous.ConfigureAwait(false); } catch { }
+
+                try
+                {
+                    await sendQueue.Writer.WriteAsync(lease, _cts.Token).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Teardown completed the writer or cancelled the bridge.
+                    lease.Dispose();
+                }
+                finally
+                {
+                    Interlocked.Add(ref pendingBytes, -length);
+                }
+            }
+
+            async Task CompleteAfterAsync(Task pending)
+            {
+                try { await pending.ConfigureAwait(false); } catch { }
+                sendQueue.Writer.TryComplete();
+            }
+
+            channel.LeaseReceived += (_, lease) =>
+            {
+                if (Volatile.Read(ref bridgeClosed) != 0 || _cts.IsCancellationRequested)
+                {
+                    lease.ReleaseIfNotRetained();
+                    return;
+                }
+
+                var length = lease.Memory.Length;
+                if (length == 0)
+                {
+                    lease.ReleaseIfNotRetained();
+                    return;
+                }
+
+                var total = Interlocked.Add(ref pendingBytes, length);
+                if (total > MaximumPendingBytes)
+                {
+                    Interlocked.Add(ref pendingBytes, -length);
+                    lease.ReleaseIfNotRetained();
+                    Log.Warn($"Forwarded channel {channel.ServerChannelId} backlog exceeded {MaximumPendingBytes} bytes; closing the bridge.");
+                    CloseBridge(closeChannel: true);
+                    return;
+                }
+
+                // Take ownership of the pooled receive buffer when possible;
+                // a non-owning/test payload gets one pooled copy.
+                lease.TryRetainOrCopy(out var owned);
+                lock (sendLocker)
+                    pendingSend = EnqueueAfterAsync(pendingSend, owned, length);
             };
 
             channel.CloseReceived += (_, _) =>
             {
-                try
-                {
-                    sendQueue.Writer.TryComplete();
-                    if (socket.Connected) socket.Shutdown(SocketShutdown.Send);
-                }
-                catch { }
+                // Stop accepting new channel data only after every byte that
+                // was already accepted from SSH has been enqueued; the send
+                // pump then drains the queue before the socket is shut down,
+                // so the tail of the forwarded stream is never truncated.
+                Task pending;
+                lock (sendLocker)
+                    pending = pendingSend;
+
+                _ = CompleteAfterAsync(pending);
             };
 
-            var sendTask = SendLoopAsync(sendQueue.Reader, socket);
+            var sendTask = SendLoopAsync(sendQueue, socket);
 
-            // Socket -> channel pump.
-            var buf = new byte[1024 * 32];
+            // Socket -> channel pump. The receive buffer is rented from the
+            // SSH packet pool and returned once the pump ends, so a server
+            // with thousands of forwarded bridges does not hold thousands of
+            // dedicated 32 KiB heap arrays.
+            const int ReadBufferSize = 1024 * 32;
+            var buf = SshBuffers.Packets.Rent(ReadBufferSize);
             try
             {
                 while (socket.Connected && !_cts.IsCancellationRequested)
@@ -234,7 +328,7 @@ namespace FxSsh.Services
                     int n;
                     try
                     {
-                        n = await socket.ReceiveAsync(buf.AsMemory(), SocketFlags.None, _cts.Token);
+                        n = await socket.ReceiveAsync(buf.AsMemory(0, ReadBufferSize), SocketFlags.None, _cts.Token);
                     }
                     catch (OperationCanceledException) { break; }
                     catch (SocketException) { break; }
@@ -243,7 +337,7 @@ namespace FxSsh.Services
                     if (n <= 0) break;
                     if (Log.IsEnabled(LogLevel.Trace))
                         Log.Trace($"Forwarding {n} bytes socket -> channel {channel.ServerChannelId}.");
-                    await channel.SendDataAsync(n == buf.Length ? buf : buf[..n]);
+                    await channel.SendDataAsync(buf.AsMemory(0, n));
                 }
             }
             catch
@@ -251,8 +345,32 @@ namespace FxSsh.Services
             }
             finally
             {
-                if (!forceClosed)
-                    channel.SendEof();
+                SshBuffers.Packets.Return(buf);
+                // No more channel->socket data: wait for every accepted chunk
+                // to be enqueued, then let the send pump drain the queue
+                // (bounded wait; closing the socket below unblocks a stuck
+                // SendAsync) before closing the TCP side and telling the peer
+                // this direction is finished.
+                Task pending;
+                lock (sendLocker)
+                    pending = pendingSend;
+
+                try { await CompleteAfterAsync(pending).WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false); } catch { }
+                try { await sendTask.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false); } catch { }
+
+                if (Volatile.Read(ref bridgeClosed) == 0)
+                {
+                    try
+                    {
+                        await channel.SendEofAsync().WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // The peer window or send gate stayed blocked; closing
+                        // the socket below still ends the bridge.
+                    }
+                }
+                try { socket.Shutdown(SocketShutdown.Both); } catch { }
                 try { socket.Close(); } catch { }
 
                 lock (_bridgeLocker)
@@ -261,8 +379,15 @@ namespace FxSsh.Services
                 Log.Debug($"Bridge closed: channel {channel.ServerChannelId}.");
                 ForwardedChannelClosed?.Invoke(this, channel);
             }
+        }
 
-            await sendTask;
+        private static async Task CloseChannelAsync(Channel channel)
+        {
+            try
+            {
+                await channel.SendCloseAsync(1).WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
+            }
+            catch { }
         }
 
         /// <summary>
@@ -271,20 +396,34 @@ namespace FxSsh.Services
         /// blocks on the local TCP peer. Each pooled buffer is disposed after
         /// SendAsync returns the rental to the pool; a send failure (peer
         /// reset) stops the pump but the finally drains and disposes every
-        /// still-queued rental so nothing leaks out of the pool.
+        /// still-queued rental so nothing leaks out of the pool. Completed
+        /// writers are signalled so a producer cannot wait forever.
         /// </summary>
-        private async Task SendLoopAsync(ChannelReader<IMemoryOwner<byte>> sendQueue, Socket socket)
+        private async Task SendLoopAsync(System.Threading.Channels.Channel<ChannelDataLease> sendQueue, Socket socket)
         {
             try
             {
-                await foreach (var data in sendQueue.ReadAllAsync(_cts.Token))
+                await foreach (var lease in sendQueue.Reader.ReadAllAsync(_cts.Token))
                 {
-                    using (data)
+                    using (lease)
                     {
                         try
                         {
-                            if (data.Memory.Length > 0 && socket.Connected)
-                                await socket.SendAsync(data.Memory, SocketFlags.None, _cts.Token);
+                            var memory = lease.Memory;
+                            if (memory.Length == 0 || !socket.Connected)
+                                continue;
+
+                            // SendAsync may accept fewer bytes than requested;
+                            // a partial write must not silently truncate the
+                            // forwarded stream.
+                            var offset = 0;
+                            while (offset < memory.Length)
+                            {
+                                var sent = await socket.SendAsync(memory[offset..], SocketFlags.None, _cts.Token);
+                                if (sent <= 0)
+                                    throw new SocketException((int)SocketError.ConnectionReset);
+                                offset += sent;
+                            }
                         }
                         catch
                         {
@@ -305,10 +444,14 @@ namespace FxSsh.Services
             }
             finally
             {
+                // Unblock any producer waiting on the bounded queue: the pump
+                // is gone, so further writes cannot be drained.
+                sendQueue.Writer.TryComplete();
+
                 // Dispose every pooled buffer still in the queue. ReadAllAsync
                 // stops on cancellation/error, so without this the rentals
                 // would be permanently withdrawn from the pool.
-                while (sendQueue.TryRead(out var item))
+                while (sendQueue.Reader.TryRead(out var item))
                     item.Dispose();
             }
         }
@@ -320,9 +463,11 @@ namespace FxSsh.Services
         /// </summary>
         public void Dispose()
         {
-            if (_disposed)
+            // Atomic compare-and-set: concurrent teardown (session CloseService
+            // plus cancel-tcpip-forward) must not run the cleanup twice or
+            // dispose the CTS while bridge pumps still await its token.
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
                 return;
-            _disposed = true;
 
             Log.Debug($"Forwarding listener {BoundAddress}:{BoundPort} stopping.");
             _cts.Cancel();
@@ -338,7 +483,9 @@ namespace FxSsh.Services
                 _bridges.Clear();
             }
 
-            _cts.Dispose();
+            // _cts is intentionally not disposed: bridge pump tasks may still
+            // be unwinding from the cancellation and would throw
+            // ObjectDisposedException while unregistering their token.
         }
     }
 }

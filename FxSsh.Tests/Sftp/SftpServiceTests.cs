@@ -134,7 +134,7 @@ namespace FxSsh.Tests.Sftp
         }
 
         [TestMethod]
-        public void Init_negotiates_the_lowest_common_version()
+        public void Init_replies_with_the_server_version_and_ignores_extension_data()
         {
             _service.OnData(Frame(writer =>
             {
@@ -154,9 +154,11 @@ namespace FxSsh.Tests.Sftp
                 writer.Write(2u);
             }));
 
+            // The engine always speaks v3 wire semantics, so it must not tell
+            // a v2 client to expect v2 frames.
             var second = LastResponse();
             Assert.AreEqual(SSH_FXP_VERSION, second.Type);
-            Assert.AreEqual(2u, second.Payload.ReadUInt32());
+            Assert.AreEqual(3u, second.Payload.ReadUInt32());
         }
 
         [TestMethod]
@@ -611,6 +613,115 @@ namespace FxSsh.Tests.Sftp
             _service.Dispose();
 
             Assert.IsTrue(handle.Disposed);
+        }
+
+        [TestMethod]
+        public void OnClose_is_idempotent()
+        {
+            _ = OpenForWrite(1, "/open.txt");
+            var closeEvents = 0;
+            _service.CloseReceived += (_, _) => closeEvents++;
+
+            _service.OnClose();
+            _service.OnClose();
+
+            Assert.AreEqual(1, closeEvents);
+        }
+
+        [TestMethod]
+        public void Dispose_after_OnClose_is_safe_and_idempotent()
+        {
+            _ = OpenForWrite(1, "/open.txt");
+            var handle = _fileSystem.LastFileHandle;
+            Assert.IsNotNull(handle);
+
+            _service.OnClose();
+            _service.Dispose();
+            _service.Dispose();
+
+            Assert.IsTrue(handle.Disposed);
+        }
+
+        [TestMethod]
+        public void Open_rejects_more_than_the_handle_limit_and_releases_the_extra_handle()
+        {
+            const int maximumOpenHandles = 256;
+            string? firstHandle = null;
+
+            for (var i = 1; i <= maximumOpenHandles; i++)
+            {
+                var handle = OpenForWrite((uint)i, "/shared.txt");
+                firstHandle ??= handle;
+            }
+
+            _service.OnData(Request(SSH_FXP_OPEN, 1000, writer =>
+            {
+                writer.Write("/shared.txt", Encoding.UTF8);
+                writer.Write((uint)(SftpOpenFlags.Write | SftpOpenFlags.Create));
+                writer.Write(0u);
+            }));
+
+            AssertStatus(SSH_FX_FAILURE);
+            Assert.IsNotNull(_fileSystem.LastFileHandle);
+            Assert.IsTrue(_fileSystem.LastFileHandle.Disposed,
+                "the handle opened after the limit was reached must be released");
+
+            // Closing one handle frees a slot for a new one.
+            _service.OnData(Request(SSH_FXP_CLOSE, 1001, writer => writer.Write(firstHandle!, Encoding.ASCII)));
+            AssertStatus(SSH_FX_OK);
+
+            _service.OnData(Request(SSH_FXP_OPEN, 1002, writer =>
+            {
+                writer.Write("/shared.txt", Encoding.UTF8);
+                writer.Write((uint)(SftpOpenFlags.Write | SftpOpenFlags.Create));
+                writer.Write(0u);
+            }));
+
+            var (type, id, _) = LastResponse();
+            Assert.AreEqual(SSH_FXP_HANDLE, type);
+            Assert.AreEqual(1002u, id);
+        }
+
+        [TestMethod]
+        public void Open_racing_a_teardown_releases_the_fresh_handle()
+        {
+            // Regression: a close landing between OpenFile and RegisterHandle
+            // used to leave the entry in a map that CloseAllHandles had
+            // already drained, leaking the descriptor until GC.
+            _fileSystem.OnOpenFile = _service.OnClose;
+
+            _service.OnData(Request(SSH_FXP_OPEN, 500, writer =>
+            {
+                writer.Write("/race.txt", Encoding.UTF8);
+                writer.Write((uint)SftpOpenFlags.Read);
+                writer.Write(0u);
+            }));
+
+            Assert.IsNotNull(_fileSystem.LastFileHandle);
+            Assert.IsTrue(_fileSystem.LastFileHandle.Disposed,
+                "a handle registered after the teardown must be released by its opener");
+            Assert.AreEqual(0, _outbound.Count, "a closed engine must not reply to the OPEN");
+        }
+
+        [TestMethod]
+        public void Frame_parser_reassembles_a_frame_fed_one_byte_at_a_time()
+        {
+            var frame = Frame(writer =>
+            {
+                writer.Write(SSH_FXP_INIT);
+                writer.Write(3u);
+            });
+
+            for (var i = 0; i < frame.Length - 1; i++)
+            {
+                _service.OnData(frame.AsMemory(i, 1));
+                Assert.AreEqual(0, _outbound.Count, $"premature response after {i + 1} byte(s)");
+            }
+
+            _service.OnData(frame.AsMemory(frame.Length - 1, 1));
+
+            Assert.AreEqual(1, _outbound.Count);
+            Assert.AreEqual(SSH_FXP_VERSION, LastResponse().Type);
         }
     }
 }

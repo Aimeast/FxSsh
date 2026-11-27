@@ -63,6 +63,14 @@ namespace FxSsh.Tests.Wire
         }
 
         [TestMethod]
+        public void Write_mpint_empty_array_becomes_zero_length_value()
+        {
+            var bytes = new SshDataWriter().WriteMpint(ReadOnlyMemory<byte>.Empty).ToByteArray();
+
+            CollectionAssert.AreEqual(new byte[] { 0x00, 0x00, 0x00, 0x00 }, bytes);
+        }
+
+        [TestMethod]
         public void Write_mpint_positive_value_without_padding()
         {
             var bytes = new SshDataWriter().WriteMpint(new byte[] { 0x01, 0x02 }).ToByteArray();

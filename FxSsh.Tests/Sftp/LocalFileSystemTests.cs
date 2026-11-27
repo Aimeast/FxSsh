@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using FxSsh.Services.Sftp;
@@ -13,22 +14,76 @@ namespace FxSsh.Tests.Sftp
     [TestClass]
     public sealed class LocalFileSystemTests
     {
+        private string _base = null!;
         private string _root = null!;
+        private string _outside = null!;
         private LocalFileSystem _fileSystem = null!;
 
         [TestInitialize]
         public void CreateTempRoot()
         {
-            _root = Path.Combine(Path.GetTempPath(), "fxssh-tests-" + Guid.NewGuid().ToString("N"));
+            _base = Path.Combine(Path.GetTempPath(), "fxssh-tests-" + Guid.NewGuid().ToString("N"));
+            _root = Path.Combine(_base, "root");
+            _outside = Path.Combine(_base, "outside");
             Directory.CreateDirectory(_root);
+            Directory.CreateDirectory(_outside);
             _fileSystem = new LocalFileSystem(_root);
         }
 
         [TestCleanup]
         public void DeleteTempRoot()
         {
-            if (Directory.Exists(_root))
-                Directory.Delete(_root, recursive: true);
+            if (Directory.Exists(_base))
+                Directory.Delete(_base, recursive: true);
+        }
+
+        private static void CreateFileLinkOrInconclusive(string linkPath, string targetPath)
+        {
+            try
+            {
+                File.CreateSymbolicLink(linkPath, targetPath);
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+            {
+                Assert.Inconclusive($"Symbolic links are unavailable on this platform: {ex.Message}");
+            }
+        }
+
+        private static void CreateDirectoryLinkOrInconclusive(string linkPath, string targetPath)
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkPath, targetPath);
+                return;
+            }
+            catch (Exception ex) when (ex is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+            {
+                // Windows without Developer Mode refuses symlinks, but an
+                // NTFS junction needs no privilege and exercises the same
+                // reparse-point resolution path.
+                if (!OperatingSystem.IsWindows())
+                    Assert.Inconclusive($"Directory links are unavailable on this platform: {ex.Message}");
+            }
+
+            try
+            {
+                using var process = Process.Start(new ProcessStartInfo(
+                    "cmd.exe", $"/c mklink /J \"{linkPath}\" \"{targetPath}\"")
+                {
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                });
+                process!.WaitForExit(5000);
+                if (process.ExitCode == 0 && Directory.Exists(linkPath))
+                    return;
+            }
+            catch (Exception)
+            {
+            }
+
+            Assert.Inconclusive("Directory links could not be created on this platform.");
         }
 
         [TestMethod]
@@ -70,6 +125,56 @@ namespace FxSsh.Tests.Sftp
 
             Assert.AreEqual(payload.Length, read);
             CollectionAssert.AreEqual(payload, buffer[..read]);
+        }
+
+        [TestMethod]
+        public void Create_applies_the_initial_attributes_to_a_new_file()
+        {
+            var attributes = new SftpFileAttributes
+            {
+                Permissions = 0x8180u, // regular file, 0600
+                Size = 7,
+            };
+
+            using (var handle = _fileSystem.OpenFile(
+                "/private.bin", SftpOpenFlags.Write | SftpOpenFlags.Create, attributes))
+            {
+                Assert.AreEqual(7, new FileInfo(Path.Combine(_root, "private.bin")).Length);
+            }
+
+            if (!OperatingSystem.IsWindows())
+            {
+                var mode = File.GetUnixFileMode(Path.Combine(_root, "private.bin"));
+                Assert.AreEqual(UnixFileMode.UserRead | UnixFileMode.UserWrite, mode,
+                    "the mode requested at create time must not be replaced by the umask default");
+            }
+        }
+
+        [TestMethod]
+        public void Create_does_not_reapply_attributes_to_an_existing_file()
+        {
+            File.WriteAllText(Path.Combine(_root, "existing.txt"), "keep");
+            // Owner must keep write access so the OPEN below can succeed;
+            // 0640 is still distinguishable from the 0600 request below.
+            var originalMode = UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.GroupRead;
+            if (!OperatingSystem.IsWindows())
+                File.SetUnixFileMode(Path.Combine(_root, "existing.txt"), originalMode);
+
+            using (var handle = _fileSystem.OpenFile(
+                "/existing.txt",
+                SftpOpenFlags.Read | SftpOpenFlags.Write | SftpOpenFlags.Create,
+                new SftpFileAttributes { Size = 0, Permissions = 0x8180u })) // 0600
+            {
+                // Existing file: neither the requested size nor the mode may
+                // be applied (open(2) only honours them on creation).
+                Assert.AreEqual(4, new FileInfo(Path.Combine(_root, "existing.txt")).Length);
+            }
+
+            if (!OperatingSystem.IsWindows())
+            {
+                var mode = File.GetUnixFileMode(Path.Combine(_root, "existing.txt"));
+                Assert.AreEqual(originalMode, mode);
+            }
         }
 
         [TestMethod]
@@ -198,6 +303,95 @@ namespace FxSsh.Tests.Sftp
         public void Constructor_validates_the_root_path()
         {
             Assert.ThrowsExactly<ArgumentNullException>(() => new LocalFileSystem(null!));
+        }
+
+        [TestMethod]
+        public void Links_inside_the_jail_are_followed()
+        {
+            File.WriteAllText(Path.Combine(_root, "file.txt"), "12345");
+            CreateFileLinkOrInconclusive(Path.Combine(_root, "link.txt"), "file.txt");
+
+            Assert.AreEqual(5ul, _fileSystem.GetAttributes("/link.txt", followLinks: true).Size);
+            Assert.AreEqual("/file.txt", _fileSystem.RealPath("/link.txt"));
+
+            using var handle = _fileSystem.OpenFile("/link.txt", SftpOpenFlags.Read, null);
+            var buffer = new byte[5];
+            Assert.AreEqual(5, handle.Read(0, buffer));
+            Assert.AreEqual("12345", Encoding.ASCII.GetString(buffer));
+        }
+
+        [TestMethod]
+        public void File_link_pointing_outside_the_jail_is_rejected()
+        {
+            var secret = Path.Combine(_outside, "secret.txt");
+            File.WriteAllText(secret, "outside");
+            CreateFileLinkOrInconclusive(Path.Combine(_root, "escape.txt"), secret);
+
+            Assert.ThrowsExactly<UnauthorizedAccessException>(() => _fileSystem.RealPath("/escape.txt"));
+            Assert.ThrowsExactly<UnauthorizedAccessException>(
+                () => _fileSystem.GetAttributes("/escape.txt", followLinks: true));
+            Assert.ThrowsExactly<UnauthorizedAccessException>(
+                () => _fileSystem.OpenFile("/escape.txt", SftpOpenFlags.Read, null));
+
+            // LSTAT and REMOVE act on the link entry itself and stay allowed.
+            var lstat = _fileSystem.GetAttributes("/escape.txt", followLinks: false);
+            Assert.AreEqual(0xA1FFu, lstat.Permissions);
+            _fileSystem.RemoveFile("/escape.txt");
+            Assert.IsFalse(File.Exists(Path.Combine(_root, "escape.txt")));
+            Assert.IsTrue(File.Exists(secret), "removing the link must not delete its target");
+        }
+
+        [TestMethod]
+        public void Directory_link_pointing_outside_the_jail_is_rejected()
+        {
+            File.WriteAllText(Path.Combine(_outside, "secret.txt"), "outside");
+            CreateDirectoryLinkOrInconclusive(Path.Combine(_root, "out"), _outside);
+
+            // The link is an intermediate component here, so every operation
+            // beneath it must resolve the link and refuse the escape.
+            Assert.ThrowsExactly<UnauthorizedAccessException>(
+                () => _fileSystem.GetAttributes("/out/secret.txt", followLinks: true));
+            Assert.ThrowsExactly<UnauthorizedAccessException>(
+                () => _fileSystem.OpenFile("/out/secret.txt", SftpOpenFlags.Read, null));
+            Assert.ThrowsExactly<UnauthorizedAccessException>(
+                () => _fileSystem.OpenDirectory("/out"));
+        }
+
+        [TestMethod]
+        public void Dangling_link_outside_the_jail_cannot_be_used_to_create_files()
+        {
+            var target = Path.Combine(_outside, "created.txt");
+            CreateFileLinkOrInconclusive(Path.Combine(_root, "dangling.txt"), target);
+
+            Assert.ThrowsExactly<UnauthorizedAccessException>(
+                () => _fileSystem.OpenFile("/dangling.txt",
+                    SftpOpenFlags.Write | SftpOpenFlags.Create, null));
+            Assert.IsFalse(File.Exists(target), "creation through an escaping link must not reach the target");
+        }
+
+        [TestMethod]
+        public void Link_cycles_are_rejected()
+        {
+            CreateFileLinkOrInconclusive(Path.Combine(_root, "a"), "b");
+            CreateFileLinkOrInconclusive(Path.Combine(_root, "b"), "a");
+
+            Assert.ThrowsExactly<UnauthorizedAccessException>(() => _fileSystem.RealPath("/a"));
+        }
+
+        [TestMethod]
+        public void Root_that_is_itself_a_link_is_resolved()
+        {
+            var realRoot = Path.Combine(_base, "real-root");
+            Directory.CreateDirectory(realRoot);
+            File.WriteAllText(Path.Combine(realRoot, "inside.txt"), "jailed");
+
+            var linkRoot = Path.Combine(_base, "link-root");
+            CreateDirectoryLinkOrInconclusive(linkRoot, realRoot);
+
+            var fileSystem = new LocalFileSystem(linkRoot);
+            Assert.AreEqual("/", fileSystem.RealPath(string.Empty));
+            Assert.AreEqual("/inside.txt", fileSystem.RealPath("/inside.txt"));
+            Assert.AreEqual(6ul, fileSystem.GetAttributes("/inside.txt", followLinks: true).Size);
         }
     }
 }

@@ -9,7 +9,7 @@ namespace FxSsh.Algorithms
     /// direction: CBC and CTR run through a streaming transform, while GCM (and
     /// plugin ciphers) are exposed as per-packet AEAD operations.
     /// </summary>
-    public class EncryptionAlgorithm
+    public class EncryptionAlgorithm : IDisposable
     {
         private readonly SymmetricAlgorithm _algorithm;
         private readonly CipherModeEx _mode;
@@ -22,6 +22,7 @@ namespace FxSsh.Algorithms
         // chacha20-poly1305@openssh.com transform).
         private readonly IAeadTransform _aeadTransform;
         private readonly int _blockBytesSize;
+        private bool _disposed;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="EncryptionAlgorithm"/> class,
@@ -30,7 +31,7 @@ namespace FxSsh.Algorithms
         /// <see cref="CtrModeCryptoTransform"/>, and GCM builds a
         /// <see cref="GcmModeCryptoTransform"/> as the AEAD transform.
         /// </summary>
-        /// <param name="algorithm">The symmetric algorithm seeded with the key and IV for CBC/CTR; unused (may be null) for GCM, which owns its key via AesGcm.</param>
+        /// <param name="algorithm">The symmetric algorithm seeded with the key and IV for CBC/CTR; unused (may be null) for GCM, which owns its key via AesGcm. The instance is owned by this transform and disposed with it.</param>
         /// <param name="keySize">The key size in bits; must equal the length of <paramref name="key"/> in bits.</param>
         /// <param name="mode">The cipher mode to configure.</param>
         /// <param name="key">The key material.</param>
@@ -168,6 +169,7 @@ namespace FxSsh.Algorithms
         /// </summary>
         public void Transform(byte[] input, int inputOffset, int inputLength, byte[] output, int outputOffset)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_transform == null)
                 throw new InvalidOperationException("Transform is only valid for CBC/CTR; use EncryptAead/DecryptAead for AEAD.");
             if (inputLength < 0 || inputOffset < 0 || inputLength > input.Length - inputOffset)
@@ -192,6 +194,7 @@ namespace FxSsh.Algorithms
         /// </summary>
         public void EncryptAead(uint sequenceNumber, ReadOnlySpan<byte> frame, Span<byte> destination)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_aeadTransform == null)
                 throw new InvalidOperationException("EncryptAead is only valid for AEAD ciphers.");
             _aeadTransform.Encrypt(sequenceNumber, frame, destination);
@@ -205,6 +208,7 @@ namespace FxSsh.Algorithms
         /// </summary>
         public int DecryptPacketLength(uint sequenceNumber, ReadOnlySpan<byte> encryptedLength)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_aeadTransform == null)
                 throw new InvalidOperationException("DecryptPacketLength is only valid for AEAD ciphers.");
             return _aeadTransform.DecryptPacketLength(sequenceNumber, encryptedLength);
@@ -225,9 +229,30 @@ namespace FxSsh.Algorithms
         /// </summary>
         public void DecryptAead(uint sequenceNumber, ReadOnlySpan<byte> lengthField, ReadOnlySpan<byte> ciphertextWithTag, Span<byte> plaintextDestination)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (_aeadTransform == null)
                 throw new InvalidOperationException("DecryptAead is only valid for AEAD ciphers.");
             _aeadTransform.Decrypt(sequenceNumber, lengthField, ciphertextWithTag, plaintextDestination);
+        }
+
+        /// <summary>
+        /// Releases the negotiated cipher: the streaming transform (CBC/CTR),
+        /// the AEAD transform (AES-GCM or a plugin that implements
+        /// <see cref="IDisposable"/>), and the symmetric algorithm instance
+        /// passed to the constructor. The instance is owned by this transform,
+        /// so callers must not share one <see cref="SymmetricAlgorithm"/>
+        /// between concurrently used transforms.
+        /// </summary>
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+
+            _transform?.Dispose();
+            if (_aeadTransform is IDisposable disposableAead)
+                disposableAead.Dispose();
+            _algorithm?.Dispose();
         }
 
         private ICryptoTransform CreateTransform(bool isEncryption)

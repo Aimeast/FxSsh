@@ -27,6 +27,13 @@ namespace FxSsh.Messages
         protected ReadOnlyMemory<byte> RawBytes { get; set; }
 
         /// <summary>
+        /// Gets the exact wire payload this message was loaded from, including
+        /// the message number. Used where the protocol requires hashing the
+        /// transmitted bytes verbatim (e.g. the KEXINIT exchange hash).
+        /// </summary>
+        internal ReadOnlyMemory<byte> RawPayload => RawBytes;
+
+        /// <summary>
         /// Materialise an independent copy of the wire bytes. RawBytes is a
         /// zero-copy slice over the SSH receive buffer, which is recycled by
         /// the next ReceiveMessage; anything that defers re-parsing RawBytes

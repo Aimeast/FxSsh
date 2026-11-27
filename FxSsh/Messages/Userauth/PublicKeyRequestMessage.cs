@@ -62,11 +62,28 @@ namespace FxSsh.Messages.UserAuth
 
             if (HasSignature)
             {
+                var remaining = reader.DataAvailable;
                 Signature = reader.ReadBinaryAsMemory();
-                // Strip the trailing `string signature` (4-byte length prefix +
-                // content) from RawBytes. The signed data is session_id ||
-                // (type .. public key blob) -- exactly what the peer signed.
-                PayloadWithoutSignature = RawBytes[..(RawBytes.Length - Signature.Length - 4)];
+
+                // Compute the exact encoded size of the signature field from
+                // what the reader actually consumed instead of assuming the
+                // length prefix is 4 bytes plus the content (a malformed or
+                // truncated length must not shift the signed payload).
+                var signatureFieldLength = remaining - reader.DataAvailable;
+                if (signatureFieldLength < 4 || signatureFieldLength > RawBytes.Length)
+                    throw new ArgumentException("Malformed publickey signature field.");
+
+                // The signed data is session_id || (type .. public key blob)
+                // -- exactly what the peer signed. Nothing may follow the
+                // signature, or the payload would be ambiguous.
+                if (reader.DataAvailable != 0)
+                    throw new ArgumentException("Trailing bytes after the publickey signature.");
+
+                PayloadWithoutSignature = RawBytes[..(RawBytes.Length - (int)signatureFieldLength)];
+            }
+            else if (reader.DataAvailable != 0)
+            {
+                throw new ArgumentException("Trailing bytes after the publickey query.");
             }
         }
     }

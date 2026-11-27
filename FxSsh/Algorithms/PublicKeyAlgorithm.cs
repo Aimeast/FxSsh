@@ -10,8 +10,10 @@ namespace FxSsh.Algorithms
     /// blob framing (algorithm name + signature wire format) and delegates
     /// the actual key storage and signing to the derived class.
     /// </summary>
-    public abstract class PublicKeyAlgorithm
+    public abstract class PublicKeyAlgorithm : IDisposable
     {
+        private bool _disposed;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="PublicKeyAlgorithm"/> class,
         /// importing an existing key when one is supplied.
@@ -21,6 +23,29 @@ namespace FxSsh.Algorithms
         {
             if (!string.IsNullOrEmpty(key))
                 ImportKey(key);
+        }
+
+        /// <summary>
+        /// Releases the asymmetric key (native key handle) held by the
+        /// concrete algorithm. Session-created host/user key instances are
+        /// disposed as soon as the key exchange or authentication request
+        /// that created them completes.
+        /// </summary>
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        /// <summary>
+        /// Releases the resources held by the derived key algorithm.
+        /// </summary>
+        /// <param name="disposing">True when called from <see cref="Dispose()"/>.</param>
+        protected virtual void Dispose(bool disposing)
+        {
         }
 
         /// <summary>

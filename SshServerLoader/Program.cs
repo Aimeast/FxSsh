@@ -171,6 +171,12 @@ TA==
             catch (ObjectDisposedException)
             {
             }
+            catch (InvalidOperationException ex)
+            {
+                // Backpressure: the send-backlog cap tripped. Stop feeding
+                // this channel instead of retrying into a full backlog.
+                Log.Warn($"Channel {channel.ServerChannelId} backpressure: {ex.Message}");
+            }
             catch (Exception)
             {
                 // Channel/session torn down mid-send; nothing left to do.
@@ -203,9 +209,16 @@ TA==
 
             var tcp = new TcpForwardService(e.Host, e.Port, e.OriginatorIP, e.OriginatorPort);
             e.Channel.DataReceived += (ss, ee) => tcp.OnData(ee);
+            e.Channel.EofReceived += (ss, ee) => tcp.OnClose();
             e.Channel.CloseReceived += (ss, ee) => tcp.OnClose();
+            e.Channel.ForceClosed += (ss, ee) => tcp.OnClose();
             tcp.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-            tcp.CloseReceived += (ss, ee) => e.Channel.SendClose();
+            // Wait for every accepted byte to be framed before CLOSE, so the
+            // close cannot overtake the target's final response.
+            tcp.CloseReceived += async (ss, ee) =>
+            {
+                try { await e.Channel.SendCloseAsync(); } catch { }
+            };
             tcp.Start();
         }
 
@@ -239,6 +252,8 @@ TA==
             e.Agreed = true;
             // Default SFTP root is the current user's home directory.
             // To serve read-only, use: new SftpService(readOnly: true);
+            // The built-in path jail is best-effort: pair it with OS-level isolation
+            // when local users can create links inside the root.
             var sftp = new SftpService();
             sftp.Attach(e.Channel);
         }
@@ -262,8 +277,17 @@ TA==
                 e.Channel.WindowChange += (ss, ee) => terminal.Resize((int)ee.WidthColumns, (int)ee.HeightRows);
                 e.Channel.DataReceived += async (ss, ee) => await TryTerminalInputAsync(terminal, ee);
                 e.Channel.CloseReceived += (ss, ee) => terminal.OnClose();
+                e.Channel.ForceClosed += (ss, ee) => terminal.OnClose();
+                // No EofReceived wiring: an interactive terminal has no
+                // half-close API, and a client EOF must not kill the shell.
                 terminal.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-                terminal.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
+                // Queue the close behind every terminal write that is already
+                // in flight; an immediate SendClose could truncate the shell's
+                // last output.
+                terminal.CloseReceived += async (ss, ee) =>
+                {
+                    try { await e.Channel.SendCloseAsync(ee); } catch { }
+                };
 
                 terminal.Run();
             }
@@ -277,9 +301,18 @@ TA==
                 var git = new GitService(command, project);
 
                 e.Channel.DataReceived += (ss, ee) => git.OnData(ee);
+                // A client half-close (SSH_MSG_CHANNEL_EOF) ends the request
+                // stream: close the child's stdin so git can flush its
+                // response and exit instead of waiting for input forever.
+                e.Channel.EofReceived += (ss, ee) => git.OnClose();
                 e.Channel.CloseReceived += (ss, ee) => git.OnClose();
+                e.Channel.ForceClosed += (ss, ee) => git.OnClose();
                 git.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-                git.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
+                // Report the exit status only after the child's output is flushed.
+                git.CloseReceived += async (ss, ee) =>
+                {
+                    try { await e.Channel.SendCloseAsync(ee); } catch { }
+                };
 
                 git.Start();
             }

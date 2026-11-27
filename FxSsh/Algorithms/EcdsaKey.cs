@@ -15,6 +15,7 @@ namespace FxSsh.Algorithms
         private readonly ECDsa _algorithm = ECDsa.Create();
         private readonly HashAlgorithmName _sha;
         private readonly string _curveName;
+        private readonly int _fieldSize;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="EcdsaKey"/> class,
@@ -30,22 +31,57 @@ namespace FxSsh.Algorithms
                 throw new ArgumentOutOfRangeException(nameof(curveName), curveName, "Curve name must be nistp256, nistp384 or nistp521.");
 
             _curveName = curveName;
+            _fieldSize = curveName switch
+            {
+                "nistp256" => 32,
+                "nistp384" => 48,
+                _ => 66, // nistp521: ceil(521 / 8)
+            };
             var noKey = string.IsNullOrEmpty(key);
-            if (curveName == "nistp256")
+            if (noKey)
             {
-                if (noKey) _algorithm = ECDsa.Create(ECCurve.NamedCurves.nistP256);
-                _sha = HashAlgorithmName.SHA256;
+                // The field initializer only exists so the base constructor's
+                // ImportKey call has an instance; replace it with the
+                // curve-specific generator and release the placeholder instead
+                // of leaving it to the finalizer.
+                _algorithm.Dispose();
+                _algorithm = curveName switch
+                {
+                    "nistp256" => ECDsa.Create(ECCurve.NamedCurves.nistP256),
+                    "nistp384" => ECDsa.Create(ECCurve.NamedCurves.nistP384),
+                    _ => ECDsa.Create(ECCurve.NamedCurves.nistP521),
+                };
             }
-            else if (curveName == "nistp384")
+
+            _sha = curveName switch
             {
-                if (noKey) _algorithm = ECDsa.Create(ECCurve.NamedCurves.nistP384);
-                _sha = HashAlgorithmName.SHA384;
-            }
-            else if (curveName == "nistp521")
+                "nistp256" => HashAlgorithmName.SHA256,
+                "nistp384" => HashAlgorithmName.SHA384,
+                _ => HashAlgorithmName.SHA512,
+            };
+
+            // The PEM was imported by the base constructor before the curve
+            // fields existed; reject a key whose curve does not match the
+            // algorithm name (e.g. a P-384 PEM registered as nistp256), which
+            // would otherwise advertise a malformed host key blob.
+            if (!noKey)
+                ValidateCurve();
+        }
+
+        private void ValidateCurve()
+        {
+            var expectedBits = _curveName switch
             {
-                if (noKey) _algorithm = ECDsa.Create(ECCurve.NamedCurves.nistP521);
-                _sha = HashAlgorithmName.SHA512;
-            }
+                "nistp256" => 256,
+                "nistp384" => 384,
+                _ => 521,
+            };
+
+            if (_algorithm.KeySize != expectedBits)
+                throw new ArgumentException(
+                    string.Format("The imported ECDSA key uses a {0}-bit curve but {1} requires {2} bits.",
+                        _algorithm.KeySize, Name, expectedBits),
+                    nameof(_curveName));
         }
 
         /// <summary>
@@ -64,6 +100,11 @@ namespace FxSsh.Algorithms
         public override void ImportKey(string key)
         {
             _algorithm.ImportFromPem(key);
+
+            // During the base constructor the derived fields are not set yet;
+            // the constructor validates the key afterwards.
+            if (_curveName != null)
+                ValidateCurve();
         }
 
         /// <summary>
@@ -90,13 +131,21 @@ namespace FxSsh.Algorithms
                 throw new CryptographicException("Key and certificates were not created with this algorithm.");
 
             var bytesQ = reader.ReadBinaryAsMemory();
+            if (reader.DataAvailable != 0)
+                throw new CryptographicException("Trailing data after the ECDSA public key.");
+
+            // Q is exactly 0x04 || X || Y with fixed-size coordinates for
+            // the named curve; any other length is malformed, not something
+            // to squeeze into the parameters.
+            if (bytesQ.Length != 1 + _fieldSize * 2)
+                throw new CryptographicException("ECDSA public key has an invalid point length.");
+
             var readerQ = new SshDataReader(bytesQ);
             if (readerQ.ReadByte() != 0x04)
                 throw new CryptographicException("Curve point compression is not supported.");
-            var fieldSize = bytesQ.Length / 2;
             var args = _algorithm.ExportParameters(false);
-            args.Q.X = readerQ.ReadBytes(fieldSize);
-            args.Q.Y = readerQ.ReadBytes(fieldSize);
+            args.Q.X = readerQ.ReadBytes(_fieldSize);
+            args.Q.Y = readerQ.ReadBytes(_fieldSize);
 
             _algorithm.ImportParameters(args);
         }
@@ -131,8 +180,20 @@ namespace FxSsh.Algorithms
         /// <returns>true when the signature is valid; otherwise false.</returns>
         public override bool VerifyData(byte[] data, byte[] signature)
         {
-            var sig = SignatureBlobToP1363(signature);
-            return _algorithm.VerifyData(data, sig, _sha, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+            try
+            {
+                var sig = SignatureBlobToP1363(signature);
+                return _algorithm.VerifyData(data, sig, _sha, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+            }
+            catch (CryptographicException)
+            {
+                return false;
+            }
+            catch (ArgumentException)
+            {
+                // Includes a truncated signature blob.
+                return false;
+            }
         }
 
         /// <summary>
@@ -143,24 +204,40 @@ namespace FxSsh.Algorithms
         /// <returns>true when the signature is valid; otherwise false.</returns>
         public override bool VerifyHash(byte[] hash, byte[] signature)
         {
-            var sig = SignatureBlobToP1363(signature);
-            return _algorithm.VerifyHash(hash, sig, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+            try
+            {
+                var sig = SignatureBlobToP1363(signature);
+                return _algorithm.VerifyHash(hash, sig, DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
+            }
+            catch (CryptographicException)
+            {
+                return false;
+            }
+            catch (ArgumentException)
+            {
+                return false;
+            }
         }
 
         private byte[] SignatureBlobToP1363(byte[] signatureBlob)
         {
+            ArgumentNullException.ThrowIfNull(signatureBlob);
+
             var reader = new SshDataReader(signatureBlob);
             var r = reader.ReadMpint();
             var s = reader.ReadMpint();
-            var fieldSize = (_algorithm.KeySize + 7) >> 3;
-            // equal to (int)Math.Ceiling((double)_algorithm.KeySize / 8);
-            //_algorithm.KeySize == 256 ? 32 :
-            //_algorithm.KeySize == 384 ? 48 :
-            //_algorithm.KeySize == 521 ? 66 :
-            //throw new InvalidDataException();
-            var bytes = new byte[fieldSize * 2];
-            Array.Copy(r, 0, bytes, fieldSize - r.Length, r.Length);
-            Array.Copy(s, 0, bytes, fieldSize + fieldSize - s.Length, s.Length);
+
+            // RFC 5656 3.1.2 defines the blob as exactly two mpints. A
+            // trailing byte or an over-long component must not shift the
+            // fixed-width P1363 buffer.
+            if (reader.DataAvailable != 0)
+                throw new CryptographicException("Trailing data after the ECDSA signature.");
+            if (r.Length > _fieldSize || s.Length > _fieldSize)
+                throw new CryptographicException("ECDSA signature component is too large.");
+
+            var bytes = new byte[_fieldSize * 2];
+            Array.Copy(r, 0, bytes, _fieldSize - r.Length, r.Length);
+            Array.Copy(s, 0, bytes, _fieldSize * 2 - s.Length, s.Length);
             return bytes;
         }
 
@@ -196,6 +273,15 @@ namespace FxSsh.Algorithms
                 .WriteMpint(bytes[..fieldSize])
                 .WriteMpint(bytes[fieldSize..])
                 .ToByteArray();
+        }
+
+        /// <summary>Releases the native ECDSA key instance.</summary>
+        /// <param name="disposing">True when called from <see cref="PublicKeyAlgorithm.Dispose()"/>.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                _algorithm?.Dispose();
+            base.Dispose(disposing);
         }
     }
 }

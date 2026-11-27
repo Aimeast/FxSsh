@@ -17,6 +17,20 @@ namespace FxSsh.Tests.Crypto
             new CipherInfo(Aes.Create(), key.Length << 3, mode).Cipher(key, iv, isEncryption);
 
         [TestMethod]
+        public void Dispose_is_idempotent_and_rejects_further_use()
+        {
+            var cipher = Create(CipherModeEx.CTR, Key256, Iv16, true);
+            var buffer = new byte[16];
+
+            cipher.Transform(buffer, buffer.Length, buffer);
+            cipher.Dispose();
+            cipher.Dispose();
+
+            Assert.ThrowsExactly<ObjectDisposedException>(
+                () => cipher.Transform(buffer, buffer.Length, buffer));
+        }
+
+        [TestMethod]
         public void Cbc_round_trips_block_aligned_data()
         {
             var plaintext = new byte[64];

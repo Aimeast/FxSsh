@@ -12,6 +12,10 @@ namespace FxSsh.Algorithms.Catalog
     /// receives null and implementations ignore it. The argument is never the
     /// algorithm's catalog name, so an alias negotiated under its own name
     /// behaves identically to its target.
+    /// Factories are invoked once per negotiation (and per direction for
+    /// ciphers/MACs) and must return a new instance: the library disposes the
+    /// returned cipher, MAC, key-exchange and host key objects when they are
+    /// replaced by a rekey or when the session ends.
     /// </remarks>
     public record AlgorithmDefine<T>(string Name, AlgorithmTag Tag, bool Supported, Func<string, T> Factory)
     {

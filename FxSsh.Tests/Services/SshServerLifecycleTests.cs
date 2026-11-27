@@ -60,6 +60,40 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public async Task StartAsync_failure_leaves_the_server_restartable()
+        {
+            // TEST-NET-1 is never assigned to a local interface, so both
+            // attempts fail in the bind. The second must fail with the same
+            // SocketException, not "already started": a failed Start must not
+            // flip the state machine.
+            using var server = new SshServer(new StartingInfo(
+                IPAddress.Parse("192.0.2.1"), GetFreePort(), "SSH-2.0-FxSsh"));
+            server.AddHostKey("ecdsa-sha2-nistp256", KeyGenerator.GenerateECDsaKeyPem("nistp256"));
+
+            await Assert.ThrowsExactlyAsync<SocketException>(() => server.StartAsync());
+            await Assert.ThrowsExactlyAsync<SocketException>(() => server.StartAsync());
+        }
+
+        [TestMethod]
+        public async Task StopAsync_closes_active_client_connections()
+        {
+            var port = GetFreePort();
+            using var server = CreateServer(port);
+            server.AddHostKey("ecdsa-sha2-nistp256", KeyGenerator.GenerateECDsaKeyPem("nistp256"));
+            await server.StartAsync();
+
+            using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
+            await client.ConnectAsync(new IPEndPoint(IPAddress.Loopback, port));
+            Assert.AreEqual("SSH-2.0-FxSsh", await ReadLineAsync(client));
+
+            await server.StopAsync();
+
+            var buffer = new byte[16];
+            var read = await client.ReceiveAsync(buffer, SocketFlags.None).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.AreEqual(0, read, "StopAsync must close accepted sessions");
+        }
+
+        [TestMethod]
         public void Dispose_marks_the_server_unusable()
         {
             var server = CreateServer(GetFreePort());
@@ -96,6 +130,25 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public async Task Start_requires_at_least_one_host_key()
+        {
+            using var server = CreateServer(GetFreePort());
+
+            await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => server.StartAsync());
+        }
+
+        [TestMethod]
+        public async Task Start_rejects_a_host_key_with_the_wrong_curve()
+        {
+            using var server = CreateServer(GetFreePort());
+            // P-384 key registered under the P-256 algorithm name would
+            // advertise a malformed host key blob to every client.
+            server.AddHostKey("ecdsa-sha2-nistp256", KeyGenerator.GenerateECDsaKeyPem("nistp384"));
+
+            await Assert.ThrowsExactlyAsync<InvalidOperationException>(() => server.StartAsync());
+        }
+
+        [TestMethod]
         public async Task Server_sends_banner_and_accepts_connections()
         {
             var port = GetFreePort();
@@ -123,10 +176,11 @@ namespace FxSsh.Tests.Services
             using var server = CreateServer(port, "SSH-2.0-FxSsh-Test");
             server.AddHostKey("ecdsa-sha2-nistp256", KeyGenerator.GenerateECDsaKeyPem("nistp256"));
 
-            // Note: Session.StartAsync swallows the version-mismatch
-            // SshConnectionException after tearing the connection down, so
-            // SshServer.ExceptionRaised does not fire on this path today; the
-            // observable contract is the clean TCP close asserted below.
+            // The version mismatch is a protocol error: the session tears the
+            // connection down and surfaces the exception to the host without
+            // sending internal error text to the peer.
+            var raised = new TaskCompletionSource<Exception>();
+            server.ExceptionRaised += (_, ex) => raised.TrySetResult(ex);
             server.Start();
 
             using var client = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
@@ -142,6 +196,9 @@ namespace FxSsh.Tests.Services
             var completed = await Task.WhenAny(receive, Task.Delay(10_000));
             Assert.AreSame(receive, completed, "the server never closed the connection");
             Assert.AreEqual(0, receive.Result, "expected a clean shutdown (0 bytes)");
+
+            var error = await raised.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.IsInstanceOfType<SshConnectionException>(error);
         }
 
         [TestMethod]

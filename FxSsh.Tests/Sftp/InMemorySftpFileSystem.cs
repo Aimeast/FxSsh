@@ -111,6 +111,13 @@ namespace FxSsh.Tests.Sftp
         /// <summary>When set, every backend call throws this exception.</summary>
         public Exception? Fault { get; set; }
 
+        /// <summary>
+        /// Invoked after <see cref="OpenFile"/> built the handle but before it
+        /// returns, so tests can land a teardown between the open and the
+        /// engine's handle registration.
+        /// </summary>
+        public Action? OnOpenFile { get; set; }
+
         private void FaultIfConfigured()
         {
             if (Fault != null)
@@ -136,6 +143,7 @@ namespace FxSsh.Tests.Sftp
                 Files[path] = Array.Empty<byte>();
 
             LastFileHandle = new MemoryFileHandle(Files, path, Files.TryGetValue(path, out var data) ? data : Array.Empty<byte>());
+            OnOpenFile?.Invoke();
             return LastFileHandle;
         }
 

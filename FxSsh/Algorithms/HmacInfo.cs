@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Security.Cryptography;
+using System.Threading;
 
 namespace FxSsh.Algorithms
 {
@@ -10,13 +11,29 @@ namespace FxSsh.Algorithms
     /// that builds the per-direction <see cref="HmacAlgorithm"/> from the
     /// key-exchange-derived key.
     /// </summary>
-    public class HmacInfo
+    /// <remarks>
+    /// The algorithm-taking constructor is single-use: the <see cref="Hmac"/>
+    /// factory hands the wrapped <see cref="KeyedHashAlgorithm"/> to the
+    /// created <see cref="HmacAlgorithm"/>, which disposes it when the MAC is
+    /// released. Invoking that factory a second time - for example by
+    /// sharing one instance between the two directions or across a rekey -
+    /// wraps an already-disposed algorithm. Create a fresh HmacInfo per
+    /// factory invocation, as the seeded catalog factories do. (The plugin
+    /// constructor is exempt: its <c>create</c> delegate is expected to
+    /// build a new instance per call.)
+    /// </remarks>
+    public class HmacInfo : IDisposable
     {
+        private readonly KeyedHashAlgorithm _algorithm;
+        private int _handedOff;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="HmacInfo"/> class from
         /// a keyed hash algorithm instance. Each invocation of
         /// <see cref="Hmac"/> creates a fresh <see cref="HmacAlgorithm"/> that
-        /// wraps this algorithm with the supplied key.
+        /// wraps this algorithm with the supplied key and owns (disposes) it,
+        /// so create a separate <see cref="HmacInfo"/> for each direction
+        /// instead of sharing one instance.
         /// </summary>
         /// <param name="algorithm">The keyed hash algorithm backing the MAC, such as <see cref="HMACSHA256"/> or <see cref="HMACSHA512"/>.</param>
         /// <param name="keySize">The MAC key size in bits.</param>
@@ -27,7 +44,16 @@ namespace FxSsh.Algorithms
 
             KeySize = keySize;
             IsEtm = isEtm;
-            Hmac = key => new HmacAlgorithm(algorithm, keySize, key);
+            _algorithm = algorithm;
+            Hmac = key =>
+            {
+                // Only a successfully built MAC takes ownership of the
+                // wrapped algorithm; if construction throws, Dispose below
+                // still releases it.
+                var mac = new HmacAlgorithm(algorithm, keySize, key);
+                Interlocked.Exchange(ref _handedOff, 1);
+                return mac;
+            };
         }
 
         /// <summary>
@@ -63,5 +89,20 @@ namespace FxSsh.Algorithms
         /// <see cref="HmacAlgorithm"/> from the MAC key derived by key exchange.
         /// </summary>
         public Func<byte[], HmacAlgorithm> Hmac { get; private set; }
+
+        /// <summary>
+        /// Releases the wrapped <see cref="KeyedHashAlgorithm"/> when no MAC
+        /// was ever created from this configuration. Once <see cref="Hmac"/>
+        /// has handed the algorithm to an <see cref="HmacAlgorithm"/>, that
+        /// MAC owns it and this method is a no-op. Key exchange calls it when
+        /// a direction is AEAD or the exchange fails, so a native HMAC that
+        /// was never used is released deterministically instead of waiting
+        /// for the finalizer.
+        /// </summary>
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _handedOff, 1) == 0)
+                _algorithm?.Dispose();
+        }
     }
 }

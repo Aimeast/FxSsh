@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using FxSsh;
@@ -160,6 +161,53 @@ namespace FxSsh.Tests.Keys
             var b = new EcdsaKey("nistp256", string.Empty).GetFingerprint();
 
             Assert.AreNotEqual(a, b);
+        }
+
+        [TestMethod]
+        public void EcdsaKey_rejects_trailing_or_malformed_key_blobs()
+        {
+            var key = new EcdsaKey("nistp256", NewEcdsaPem("nistp256"));
+            var validBlob = key.CreateKeyAndCertificatesData();
+            var withTrailing = validBlob.Concat(new byte[] { 0x00 }).ToArray();
+
+            Assert.ThrowsExactly<CryptographicException>(
+                () => key.LoadKeyAndCertificatesData(withTrailing));
+
+            // Q must be exactly 0x04 || X || Y for the curve, not an
+            // arbitrary-length binary string.
+            var shortPoint = new SshDataWriter()
+                .Write(key.Name, Encoding.ASCII)
+                .Write("nistp256", Encoding.ASCII)
+                .WriteBinary(new byte[] { 0x04, 0x01, 0x02 })
+                .ToByteArray();
+            Assert.ThrowsExactly<CryptographicException>(
+                () => key.LoadKeyAndCertificatesData(shortPoint));
+        }
+
+        [TestMethod]
+        public void EcdsaKey_returns_false_for_malformed_signatures()
+        {
+            var key = new EcdsaKey("nistp256", NewEcdsaPem("nistp256"));
+            var data = Encoding.ASCII.GetBytes("verify me");
+
+            // Empty and truncated blobs must not escape as exceptions.
+            Assert.IsFalse(key.VerifyData(data, Array.Empty<byte>()));
+            Assert.IsFalse(key.VerifyData(data, new byte[] { 0x00, 0x00, 0x00, 0x02, 0x01, 0x02 }));
+
+            // Trailing bytes after the two mpints make the blob ambiguous.
+            var valid = key.SignData(data);
+            Assert.IsFalse(key.VerifyData(data, valid.Concat(new byte[] { 0x00 }).ToArray()));
+
+            // Components wider than the curve field would shift the fixed
+            // P1363 buffer.
+            var oversizedR = new byte[33];
+            oversizedR[0] = 0x01;
+            var oversized = new SshDataWriter()
+                .WriteMpint(oversizedR)
+                .WriteMpint(new byte[] { 0x01 })
+                .ToByteArray();
+            Assert.IsFalse(key.VerifyData(data, oversized));
+            Assert.IsFalse(key.VerifyHash(SHA256.HashData(data), oversized));
         }
     }
 

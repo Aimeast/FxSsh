@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using FxSsh.Logging;
 using static FxSsh.Services.Pty.Native.UnixApi;
 using SystemProcess = System.Diagnostics.Process;
 
@@ -106,39 +107,76 @@ namespace FxSsh.Services.Pty
         /// </summary>
         public void Run()
         {
-            Task.Run(() =>
+            // A dedicated background thread, not Task.Run: the loop blocks in
+            // read(2) for the whole lifetime of the shell, and consuming a
+            // thread-pool thread for that would starve the pool once a few
+            // interactive sessions are open.
+            var thread = new Thread(RunReadLoop)
             {
-                var buf = new byte[1024 * 4];
-                var handle = GCHandle.Alloc(buf, GCHandleType.Pinned);
-                try
+                IsBackground = true,
+                Name = "FxSsh pty read",
+            };
+            thread.Start();
+        }
+
+        private void RunReadLoop()
+        {
+            var buf = new byte[1024 * 4];
+            var handle = GCHandle.Alloc(buf, GCHandleType.Pinned);
+            try
+            {
+                var ptr = handle.AddrOfPinnedObject();
+                while (true)
                 {
-                    var ptr = handle.AddrOfPinnedObject();
-                    while (true)
+                    int length = read(_masterFd, ptr, buf.Length);
+                    if (length <= 0)
+                        break;   // EIO / EOF after the slave side is closed
+                    try
                     {
-                        int length = read(_masterFd, ptr, buf.Length);
-                        if (length <= 0)
-                            break;   // EIO / EOF after the slave side is closed
                         DataReceived?.Invoke(this, buf.AsSpan(0, length).ToArray());
                     }
+                    catch (Exception ex)
+                    {
+                        // A handler exception (e.g. a send into a channel torn
+                        // down mid-session) must not escape: this loop runs on
+                        // a bare thread whose unhandled exception terminates
+                        // the whole process.
+                        Log.Fail("PTY DataReceived handler failed.", ex);
+                    }
                 }
-                finally
-                {
-                    handle.Free();
-                }
+            }
+            catch (Exception ex)
+            {
+                // The read loop itself failed unexpectedly (e.g. the master fd
+                // was closed concurrently). Stop the child and fall through to
+                // the exit notification instead of crashing the process.
+                Log.Fail("PTY read loop failed.", ex);
+                try { _process?.Kill(); } catch { }
+            }
+            finally
+            {
+                handle.Free();
+            }
 
-                // Slave side closed: the shell exited; report its real exit code.
-                int code = 0;
-                try
-                {
-                    _process?.WaitForExit();
-                    if (_process != null && _process.HasExited)
-                        code = _process.ExitCode;
-                }
-                catch
-                {
-                }
+            // Slave side closed: the shell exited; report its real exit code.
+            int code = 0;
+            try
+            {
+                _process?.WaitForExit();
+                if (_process != null && _process.HasExited)
+                    code = _process.ExitCode;
+            }
+            catch
+            {
+            }
+            try
+            {
                 CloseReceived?.Invoke(this, (uint)Math.Max(0, code));
-            });
+            }
+            catch (Exception ex)
+            {
+                Log.Fail("PTY CloseReceived handler failed.", ex);
+            }
         }
 
         /// <summary>

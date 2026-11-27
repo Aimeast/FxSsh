@@ -94,6 +94,38 @@ namespace FxSsh.IntegrationTests.Integration
             }
         }
 
+        [IntegrationTestMethod]
+        public async Task Interactive_shell_propagates_its_exit_status()
+        {
+            IntegrationGuard.RequireSshClient();
+            if (OperatingSystem.IsWindows())
+                Assert.Inconclusive("the exit-status probe uses a POSIX interactive shell");
+
+            await using var server = await TestSshServer.StartAsync();
+            var key = OpenSshClient.GenerateKeyPair(_tempDir);
+            server.AcceptedFingerprints.Add("*");
+
+            using var ssh = OpenSshClient.StartSsh(
+                $"{OpenSshClient.CommonOptions(server.Port, key)} -o BatchMode=yes -tt " +
+                OpenSshClient.Target(TestSshServer.Username));
+
+            var readError = ssh.StandardError.ReadToEndAsync();
+
+            await Task.Delay(750);
+            await ssh.StandardInput.WriteAsync("exit 7\n");
+            await ssh.StandardInput.FlushAsync();
+
+            var exited = ssh.WaitForExit(15_000);
+            var error = await readError;
+            if (!exited)
+            {
+                try { ssh.Kill(entireProcessTree: true); } catch { }
+                Assert.Fail($"the interactive shell did not exit; stderr: {Truncate(error)}");
+            }
+
+            Assert.AreEqual(7, ssh.ExitCode, $"stderr: {Truncate(error)}");
+        }
+
         private static string Truncate(string value) =>
             value.Length <= 4000 ? value : value[..4000] + "...(truncated)";
     }

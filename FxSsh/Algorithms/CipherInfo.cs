@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Threading;
 
 namespace FxSsh.Algorithms
 {
@@ -11,8 +12,22 @@ namespace FxSsh.Algorithms
     /// <see cref="EncryptionAlgorithm"/> from the key-exchange-derived key
     /// and IV.
     /// </summary>
-    public class CipherInfo
+    /// <remarks>
+    /// An instance is single-use: the <see cref="Cipher"/> factory hands the
+    /// wrapped <see cref="SymmetricAlgorithm"/> to the created
+    /// <see cref="EncryptionAlgorithm"/>, which disposes it when the
+    /// transform is released (the plugin constructors have the same
+    /// ownership rule for their transform). Invoking the factory a second
+    /// time - for example by sharing one instance between the two
+    /// directions or across a rekey - wraps an already-disposed algorithm.
+    /// Create a fresh CipherInfo per factory invocation, as the seeded
+    /// catalog factories do.
+    /// </remarks>
+    public class CipherInfo : IDisposable
     {
+        private readonly SymmetricAlgorithm _algorithm;
+        private int _handedOff;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="CipherInfo"/> class
         /// around a <see cref="SymmetricAlgorithm"/> instance. The key size is
@@ -39,10 +54,20 @@ namespace FxSsh.Algorithms
                 throw new ArgumentOutOfRangeException(nameof(keySize), keySize, "Key size is not legal for the algorithm.");
 
             algorithm.KeySize = keySize;
+            _algorithm = algorithm;
             KeySize = algorithm.KeySize;
             BlockSize = algorithm.BlockSize;
             IVSize = BlockSize >> 3; // CBC/CTR: IV length equals block size in bytes.
-            Cipher = (key, iv, isEncryption) => new EncryptionAlgorithm(algorithm, keySize, mode, key, iv, isEncryption);
+            IsAead = mode == CipherModeEx.GCM;
+            Cipher = (key, iv, isEncryption) =>
+            {
+                // Only a successfully built transform takes ownership of the
+                // wrapped algorithm; if construction throws, Dispose below
+                // still releases it.
+                var transform = new EncryptionAlgorithm(algorithm, keySize, mode, key, iv, isEncryption);
+                Interlocked.Exchange(ref _handedOff, 1);
+                return transform;
+            };
         }
 
         /// <summary>
@@ -63,6 +88,7 @@ namespace FxSsh.Algorithms
             KeySize = keySize;
             BlockSize = 128; // AES block size in bits; BlockBytesSize derives 16 from this.
             IVSize = 12;    // RFC 5647 section 7.1 + OpenSSL SET_IV_FIXED(arg=-1): full 12-byte nonce from KEX.
+            IsAead = true;
             Cipher = (key, iv, isEncryption) => new EncryptionAlgorithm(null, keySize, CipherModeEx.GCM, key, iv, isEncryption);
         }
 
@@ -88,6 +114,7 @@ namespace FxSsh.Algorithms
             KeySize = keySize;
             BlockSize = blockSizeBits;
             IVSize = 0;
+            IsAead = true;
             Cipher = (key, iv, isEncryption) => new EncryptionAlgorithm(createTransform(key), blockSizeBits >> 3);
         }
 
@@ -101,12 +128,37 @@ namespace FxSsh.Algorithms
         public int IVSize { get; private set; }
 
         /// <summary>
+        /// True for AEAD ciphers (AES-GCM per RFC 5647, chacha20-poly1305@openssh.com).
+        /// An AEAD direction does not use the negotiated MAC, so key exchange
+        /// skips building an HMAC descriptor for it.
+        /// </summary>
+        public bool IsAead { get; private set; }
+
+        /// <summary>
         /// Gets the factory delegate that creates an
         /// <see cref="EncryptionAlgorithm"/> for one direction of the packet
         /// cipher. The arguments are the encryption/decryption key, the
         /// initial vector, and a value indicating whether the transform
-        /// encrypts (true) or decrypts (false).
+        /// encrypts (true) or decrypts (false). The created transform takes
+        /// ownership of the configured <see cref="SymmetricAlgorithm"/> and
+        /// disposes it, so create a separate <see cref="CipherInfo"/> for each
+        /// direction instead of sharing one instance.
         /// </summary>
         public Func<byte[], byte[], bool, EncryptionAlgorithm> Cipher { get; private set; }
+
+        /// <summary>
+        /// Releases the wrapped <see cref="SymmetricAlgorithm"/> when no
+        /// transform was ever created from this configuration. Once
+        /// <see cref="Cipher"/> has handed the algorithm to an
+        /// <see cref="EncryptionAlgorithm"/>, that transform owns it and this
+        /// method is a no-op. Key exchange calls it on failure paths so a
+        /// native cipher that was never used is released deterministically
+        /// instead of waiting for the finalizer.
+        /// </summary>
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _handedOff, 1) == 0)
+                _algorithm?.Dispose();
+        }
     }
 }

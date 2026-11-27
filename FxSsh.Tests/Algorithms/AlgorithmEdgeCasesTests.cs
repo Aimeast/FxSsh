@@ -59,8 +59,11 @@ namespace FxSsh.Tests.Algorithms
             Random.Shared.NextBytes(iv);
 
             var plaintext = new byte[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16 };
-            var cipher = info.Cipher(key, iv, true);
-            var decipher = info.Cipher(key, iv, false);
+            // Each transform owns the symmetric algorithm it was built with.
+            using var cipher = new CipherInfo(System.Security.Cryptography.TripleDES.Create(), 192, CipherModeEx.CBC)
+                .Cipher(key, iv, true);
+            using var decipher = new CipherInfo(System.Security.Cryptography.TripleDES.Create(), 192, CipherModeEx.CBC)
+                .Cipher(key, (byte[])iv.Clone(), false);
 
             var ciphertext = cipher.Transform(plaintext);
             CollectionAssert.AreEqual(plaintext, decipher.Transform(ciphertext));

@@ -323,6 +323,39 @@ namespace FxSsh.Tests.Messages
         }
 
         [TestMethod]
+        public void PasswordRequestMessage_decodes_the_password_as_utf8()
+        {
+            var baseMessage = new RequestMessage();
+            baseMessage.Load(TestMessages.Payload(RequestMessage.MessageNumber)
+                .Write("alice", Encoding.UTF8)
+                .Write("ssh-connection", Encoding.ASCII)
+                .Write("password", Encoding.ASCII)
+                .Write(false)
+                .Write("pässwörd", Encoding.UTF8)
+                .ToByteArray());
+
+            var password = Message.LoadFrom<PasswordRequestMessage>(baseMessage);
+
+            Assert.AreEqual("pässwörd", password.Password);
+        }
+
+        [TestMethod]
+        public void PasswordRequestMessage_rejects_password_change_requests()
+        {
+            var baseMessage = new RequestMessage();
+            baseMessage.Load(TestMessages.Payload(RequestMessage.MessageNumber)
+                .Write("alice", Encoding.UTF8)
+                .Write("ssh-connection", Encoding.ASCII)
+                .Write("password", Encoding.ASCII)
+                .Write(true) // obsolete old-password flag: change request
+                .Write("new-password", Encoding.UTF8)
+                .ToByteArray());
+
+            Assert.ThrowsExactly<ArgumentException>(
+                () => Message.LoadFrom<PasswordRequestMessage>(baseMessage));
+        }
+
+        [TestMethod]
         public void PublicKeyRequestMessage_without_signature_loads_key_fields()
         {
             var keyBlob = new byte[] { 0x00, 0x11, 0x22 };
@@ -377,6 +410,54 @@ namespace FxSsh.Tests.Messages
                 .WriteBinary(keyBlob)
                 .ToByteArray();
             CollectionAssert.AreEqual(expectedPrefix, publicKey.PayloadWithoutSignature.ToArray());
+        }
+
+        [TestMethod]
+        public void PublicKeyRequestMessage_rejects_trailing_bytes_after_the_signature()
+        {
+            var baseMessage = new RequestMessage();
+            baseMessage.Load(TestMessages.Payload(RequestMessage.MessageNumber)
+                .Write("alice", Encoding.UTF8)
+                .Write("ssh-connection", Encoding.ASCII)
+                .Write("publickey", Encoding.ASCII)
+                .Write(true)
+                .Write("ecdsa-sha2-nistp256", Encoding.ASCII)
+                .WriteBinary(new byte[] { 0x00, 0x11, 0x22 })
+                .WriteBinary(new byte[] { 0xAA, 0xBB })
+                .Write((byte)0xFF) // trailing garbage
+                .ToByteArray());
+
+            Assert.ThrowsExactly<ArgumentException>(
+                () => Message.LoadFrom<PublicKeyRequestMessage>(baseMessage));
+        }
+
+        [TestMethod]
+        public void PublicKeyRequestMessage_rejects_trailing_bytes_after_a_query()
+        {
+            var baseMessage = new RequestMessage();
+            baseMessage.Load(TestMessages.Payload(RequestMessage.MessageNumber)
+                .Write("alice", Encoding.UTF8)
+                .Write("ssh-connection", Encoding.ASCII)
+                .Write("publickey", Encoding.ASCII)
+                .Write(false)
+                .Write("ecdsa-sha2-nistp256", Encoding.ASCII)
+                .WriteBinary(new byte[] { 0x00, 0x11, 0x22 })
+                .Write((byte)0xFF) // trailing garbage
+                .ToByteArray());
+
+            Assert.ThrowsExactly<ArgumentException>(
+                () => Message.LoadFrom<PublicKeyRequestMessage>(baseMessage));
+        }
+
+        [TestMethod]
+        public void ExtInfoMessage_rejects_a_hostile_extension_count()
+        {
+            var message = new ExtInfoMessage();
+
+            Assert.ThrowsExactly<ArgumentException>(() => message.Load(
+                TestMessages.Payload(ExtInfoMessage.MessageNumber)
+                    .Write(uint.MaxValue)
+                    .ToByteArray()));
         }
 
         [TestMethod]

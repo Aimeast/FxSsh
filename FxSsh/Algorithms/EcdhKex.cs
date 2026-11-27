@@ -78,12 +78,21 @@ namespace FxSsh.Algorithms
             args.Curve = _ecdh.PublicKey.ExportParameters().Curve;
             args.Q = new ECPoint { X = reader.ReadBytes(qlength), Y = reader.ReadBytes(qlength) };
 
-            var clientPublicKey = ECDiffieHellman.Create(args).PublicKey;
-            var agreement = _ecdh.DeriveRawSecretAgreement(clientPublicKey);
+            using var clientEcdh = ECDiffieHellman.Create(args);
+            var agreement = _ecdh.DeriveRawSecretAgreement(clientEcdh.PublicKey);
             var sharedSecret = new BigInteger(agreement, isUnsigned: true, isBigEndian: true)
                 .ToByteArray(isUnsigned: false, isBigEndian: true);
 
             return sharedSecret;
+        }
+
+        /// <summary>Releases the ephemeral ECDH key pair.</summary>
+        /// <param name="disposing">True when called from <see cref="KexAlgorithm.Dispose()"/>.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                _ecdh?.Dispose();
+            base.Dispose(disposing);
         }
     }
 }

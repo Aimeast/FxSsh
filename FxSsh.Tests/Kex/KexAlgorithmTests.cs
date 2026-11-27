@@ -41,6 +41,25 @@ namespace FxSsh.Tests.Kex
         }
 
         [TestMethod]
+        public void DiffieHellman_rejects_public_values_outside_the_valid_range()
+        {
+            // RFC 4253 section 8 requires 1 < e < p-1. Zero, one and values
+            // at or above p-1 yield a predictable shared secret.
+            var outsideRange = new[]
+            {
+                new byte[] { 0x00 },
+                new byte[] { 0x01 },
+                Enumerable.Repeat((byte)0xFF, 300).ToArray(), // > any supported p
+            };
+
+            foreach (var e in outsideRange)
+            {
+                var server = new DiffieHellmanKex(256, 2048);
+                Assert.ThrowsExactly<SshConnectionException>(() => server.DecryptKeyExchange(e));
+            }
+        }
+
+        [TestMethod]
         public void Ecdh_agrees_on_every_supported_curve()
         {
             foreach (var curve in new[] { "nistp256", "nistp384", "nistp521" })

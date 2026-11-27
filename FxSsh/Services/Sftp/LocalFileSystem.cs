@@ -1,8 +1,6 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Text;
-using System.Threading;
 
 namespace FxSsh.Services.Sftp
 {
@@ -10,14 +8,29 @@ namespace FxSsh.Services.Sftp
     /// Default <see cref="ISftpFileSystem"/> backed by the local disk, rooted
     /// at a single directory (a chroot-style jail). All client paths are
     /// resolved against the configured root directory and are prevented from
-    /// escaping it (draft-ietf-secsh-filexfer-02, section 6.2).
+    /// escaping it (draft-ietf-secsh-filexfer-02, section 6.2), including
+    /// through symbolic links and NTFS junctions inside the jail: every path
+    /// component is resolved and a link that points outside the root is
+    /// rejected.
     ///
     /// Errors surface as the corresponding .NET exceptions; the protocol
     /// engine maps them to SSH_FX_* status codes. This is the one place
     /// platform-specific path handling lives.
     /// </summary>
+    /// <remarks>
+    /// The jail is best-effort, not a security boundary. Path resolution and
+    /// the subsequent file operation are separate steps, so a concurrent
+    /// local process that can replace a path component can still race the
+    /// check between validation and use (TOCTOU). For adversarial local
+    /// users, combine this with OS-level isolation (a dedicated service
+    /// account, chroot/container, or mount namespace) instead of relying on
+    /// the path checks alone.
+    /// </remarks>
     public sealed class LocalFileSystem : ISftpFileSystem
     {
+        /// <summary>Maximum number of links followed while resolving one path (matches the Linux ELOOP limit).</summary>
+        private const int MaximumLinkHops = 40;
+
         private readonly string _rootPath;
         private readonly bool _readOnly;
 
@@ -41,9 +54,17 @@ namespace FxSsh.Services.Sftp
         {
             ArgumentNullException.ThrowIfNull(rootPath);
 
+            // Resolve links in the root itself (e.g. /tmp -> /private/tmp):
+            // the jail must be checked against the real directory, otherwise
+            // every resolved link target would look like an escape.
+            var realRoot = ResolveRootLinks(Path.GetFullPath(rootPath));
+
             // Normalize once: ensure a trailing separator so the escape check
             // ("starts with root") cannot be fooled by prefix siblings.
-            _rootPath = Path.GetFullPath(rootPath + Path.DirectorySeparatorChar);
+            var trimmed = Path.TrimEndingDirectorySeparator(realRoot);
+            _rootPath = trimmed.EndsWith(Path.DirectorySeparatorChar)
+                ? trimmed
+                : trimmed + Path.DirectorySeparatorChar;
             _readOnly = readOnly;
         }
 
@@ -84,7 +105,7 @@ namespace FxSsh.Services.Sftp
         /// <param name="attributes">Initial attributes for a created file; may be null.</param>
         /// <returns>A handle for positional reads and writes on the file.</returns>
         /// <exception cref="ArgumentException">No access flag was requested, or <see cref="SftpOpenFlags.Truncate"/> or <see cref="SftpOpenFlags.Exclusive"/> was set without <see cref="SftpOpenFlags.Create"/>.</exception>
-        /// <exception cref="UnauthorizedAccessException">The path escapes the root, the file system is read-only and a write-capable flag was set, or the OS denied access.</exception>
+        /// <exception cref="UnauthorizedAccessException">The path escapes the root (including through a link), the file system is read-only and a write-capable flag was set, or the OS denied access.</exception>
         public ISftpFileHandle OpenFile(string path, SftpOpenFlags flags, SftpFileAttributes attributes)
         {
             var absPath = GetAbsolutePath(path);
@@ -101,10 +122,32 @@ namespace FxSsh.Services.Sftp
 
             var mode = MapMode(flags);
             var append = (flags & SftpOpenFlags.Append) != 0;
+
+            // OPEN may carry the initial mode/times for a file it creates
+            // (draft section 6.3). As with open(2), they only apply when the
+            // file did not exist, so a plain OPEN cannot chmod an existing
+            // file; without this a client asking for 0600 would get the
+            // umask-derived default instead.
+            var existed = File.Exists(absPath);
+
             // Share write/delete so a FSETSTAT (or a second SFTP open) can
             // open the file again while this handle is alive - without this,
             // Windows fails the second open with "used by another process".
             var fs = new FileStream(absPath, mode, access, FileShare.Read | FileShare.Write | FileShare.Delete);
+            if (!existed && (flags & SftpOpenFlags.Create) != 0 && attributes != null)
+            {
+                try
+                {
+                    ApplyAttr(new FileInfo(absPath), attributes);
+                }
+                catch
+                {
+                    // Do not leave a half-configured handle behind.
+                    fs.Dispose();
+                    throw;
+                }
+            }
+
             return new LocalFileHandle(fs, absPath, append, _readOnly);
         }
 
@@ -119,10 +162,18 @@ namespace FxSsh.Services.Sftp
         public ISftpDirectoryHandle OpenDirectory(string path)
         {
             var absPath = GetAbsolutePath(path);
-            if (!Directory.Exists(absPath))
+            FileAttributes attributes;
+            try
+            {
+                attributes = File.GetAttributes(absPath);
+            }
+            catch (FileNotFoundException)
+            {
                 throw new DirectoryNotFoundException(absPath);
-            if (!HasReadPermission(absPath))
-                throw new UnauthorizedAccessException(absPath);
+            }
+
+            if ((attributes & FileAttributes.Directory) == 0)
+                throw new DirectoryNotFoundException(absPath);
 
             return new LocalDirectoryHandle(absPath);
         }
@@ -138,28 +189,28 @@ namespace FxSsh.Services.Sftp
         /// <exception cref="UnauthorizedAccessException">The path escapes the root.</exception>
         public SftpFileAttributes GetAttributes(string path, bool followLinks)
         {
-            var absPath = GetAbsolutePath(path);
-            if (followLinks)
+            var absPath = GetAbsolutePath(path, followLinks);
+            try
             {
-                if (File.Exists(absPath) || Directory.Exists(absPath))
-                    return GetAttr(new FileInfo(absPath));
-                // Explicit ASCII message: FileNotFoundException's default
-                // (null-message) text is localized and confuses some SFTP
-                // clients (scp) that surface it verbatim.
+                // GetInfo lets permission/IO failures propagate as their real
+                // exception type; File.Exists/Directory.Exists would swallow
+                // them and misreport the file as missing.
+                return GetAttr(GetInfo(absPath));
+            }
+            catch (FileNotFoundException)
+            {
                 throw new FileNotFoundException($"File not found: {absPath}", absPath);
             }
-
-            // LSTAT: report the link itself, not its target. .NET exposes
-            // links via FileSystemInfo.LinkTarget; when the path is a link,
-            // FileInfo/DirectoryInfo already describe the link entry.
-            var info = GetInfo(absPath);
-            return GetAttr(info);
+            catch (DirectoryNotFoundException)
+            {
+                throw new FileNotFoundException($"File not found: {absPath}", absPath);
+            }
         }
 
         /// <summary>
         /// Applies the times and size carried by <paramref name="attributes"/> to the
         /// file at <paramref name="path"/>; a non-null size truncates or extends the
-        /// file. Maps to SSH_FXP_SETSTAT.
+        /// file, and POSIX permissions are applied on Unix. Maps to SSH_FXP_SETSTAT.
         /// </summary>
         /// <param name="path">Server-side path, resolved against the root.</param>
         /// <param name="attributes">Attributes to apply; null fields are left unchanged.</param>
@@ -173,16 +224,26 @@ namespace FxSsh.Services.Sftp
         }
 
         /// <summary>
-        /// Deletes the file at <paramref name="path"/>. Maps to SSH_FXP_REMOVE.
+        /// Deletes the file at <paramref name="path"/>. A symbolic link is
+        /// removed itself, never its target. Maps to SSH_FXP_REMOVE.
         /// </summary>
         /// <param name="path">Server-side path, resolved against the root.</param>
         /// <exception cref="UnauthorizedAccessException">The path is a directory, escapes the root, or the file system is read-only.</exception>
         public void RemoveFile(string path)
         {
             EnsureWritable();
-            var absPath = GetAbsolutePath(path);
-            if (Directory.Exists(absPath))
-                throw new UnauthorizedAccessException($"'{path}' is a directory; use RMDIR.");
+            var absPath = GetAbsolutePath(path, followFinalLink: false);
+            var fileAttributes = File.GetAttributes(absPath);
+            if ((fileAttributes & FileAttributes.Directory) != 0)
+            {
+                // A link to a directory is removed as a link; a real
+                // directory must go through RMDIR.
+                if ((fileAttributes & FileAttributes.ReparsePoint) == 0)
+                    throw new UnauthorizedAccessException($"'{path}' is a directory; use RMDIR.");
+                Directory.Delete(absPath, recursive: false);
+                return;
+            }
+
             File.Delete(absPath);
         }
 
@@ -196,9 +257,15 @@ namespace FxSsh.Services.Sftp
         public void Rename(string oldPath, string newPath)
         {
             EnsureWritable();
-            var absOld = GetAbsolutePath(oldPath);
-            var absNew = GetAbsolutePath(newPath);
-            if (File.GetAttributes(absOld).HasFlag(FileAttributes.Directory))
+            // Never follow the final components: renaming moves the link
+            // entry itself, and a link at the destination is replaced rather
+            // than written through. Intermediate directories are still
+            // resolved and kept inside the jail.
+            var absOld = GetAbsolutePath(oldPath, followFinalLink: false);
+            var absNew = GetAbsolutePath(newPath, followFinalLink: false);
+            var fileAttributes = File.GetAttributes(absOld);
+            if ((fileAttributes & FileAttributes.Directory) != 0 &&
+                (fileAttributes & FileAttributes.ReparsePoint) == 0)
                 Directory.Move(absOld, absNew);
             else
                 File.Move(absOld, absNew);
@@ -210,21 +277,31 @@ namespace FxSsh.Services.Sftp
         /// </summary>
         /// <param name="path">Server-side path, resolved against the root.</param>
         /// <param name="attributes">Attributes to apply to the new directory; may be null.</param>
+        /// <exception cref="DirectoryNotFoundException">The parent directory does not exist.</exception>
         /// <exception cref="IOException">A file or directory already exists at the path.</exception>
         /// <exception cref="UnauthorizedAccessException">The path escapes the root or the file system is read-only.</exception>
         public void MakeDirectory(string path, SftpFileAttributes attributes)
         {
             EnsureWritable();
-            var absPath = GetAbsolutePath(path);
-            if (Directory.Exists(absPath) || File.Exists(absPath))
+            var absPath = GetAbsolutePath(path, followFinalLink: false);
+            if (TryGetAttributes(absPath, out _))
                 throw new IOException($"'{path}' already exists.");
+
+            // MKDIR is single-level: unlike Directory.CreateDirectory, a
+            // missing parent must fail (draft 6.5), not be created silently.
+            var parent = Path.GetDirectoryName(absPath);
+            if (string.IsNullOrEmpty(parent) || !Directory.Exists(parent))
+                throw new DirectoryNotFoundException($"Parent directory not found for '{path}'.");
+
             Directory.CreateDirectory(absPath);
             if (attributes != null)
                 ApplyAttr(new DirectoryInfo(absPath), attributes);
         }
 
         /// <summary>
-        /// Deletes the empty directory at <paramref name="path"/>. Maps to SSH_FXP_RMDIR.
+        /// Deletes the empty directory at <paramref name="path"/>. The final
+        /// link is not followed, so a link is removed instead of its target
+        /// being deleted. Maps to SSH_FXP_RMDIR.
         /// </summary>
         /// <param name="path">Server-side path, resolved against the root.</param>
         /// <exception cref="DirectoryNotFoundException">The path does not exist.</exception>
@@ -232,10 +309,20 @@ namespace FxSsh.Services.Sftp
         public void RemoveDirectory(string path)
         {
             EnsureWritable();
-            var absPath = GetAbsolutePath(path);
-            if (!Directory.Exists(absPath))
+            var absPath = GetAbsolutePath(path, followFinalLink: false);
+            FileAttributes attributes;
+            try
+            {
+                attributes = File.GetAttributes(absPath);
+            }
+            catch (FileNotFoundException)
+            {
                 throw new DirectoryNotFoundException(absPath);
-            Directory.Delete(absPath, false);
+            }
+
+            if ((attributes & FileAttributes.Directory) == 0)
+                throw new DirectoryNotFoundException(absPath);
+            Directory.Delete(absPath, recursive: false);
         }
 
         /// <summary>
@@ -253,7 +340,7 @@ namespace FxSsh.Services.Sftp
             // root itself canonicalizes to "/", not "/." (GetRelativePath
             // returns "." for the base path).
             var absPath = GetAbsolutePath(path);
-            if (string.Equals(absPath, _rootPath, StringComparison.Ordinal))
+            if (IsSamePath(absPath, _rootPath))
                 return "/";
 
             var relative = Path.GetRelativePath(_rootPath, absPath)
@@ -288,7 +375,13 @@ namespace FxSsh.Services.Sftp
         /// the jail. Throws <see cref="UnauthorizedAccessException"/> on
         /// traversal attempts (section 6.2 security warning).
         /// </summary>
-        private string GetAbsolutePath(string path)
+        /// <param name="path">Client path.</param>
+        /// <param name="followFinalLink">
+        /// True to resolve a link in the final component (open/stat target);
+        /// false for operations that act on the link entry itself (LSTAT,
+        /// REMOVE, RENAME, RMDIR).
+        /// </param>
+        private string GetAbsolutePath(string path, bool followFinalLink = true)
         {
             var trimmed = path?.TrimStart('/') ?? string.Empty;
 
@@ -302,7 +395,225 @@ namespace FxSsh.Services.Sftp
             var absPath = Path.GetFullPath(Path.Combine(_rootPath, trimmed));
             if (!IsWithinRoot(_rootPath, absPath))
                 throw new UnauthorizedAccessException($"Path '{path}' escapes the SFTP root.");
-            return absPath;
+
+            var relative = Path.GetRelativePath(_rootPath, absPath);
+            if (relative == ".")
+                return _rootPath;
+
+            return ResolveComponents(relative, followFinalLink);
+        }
+
+        /// <summary>
+        /// Walk the components of <paramref name="relativePath"/>, resolving
+        /// every symbolic link / junction and verifying that its target stays
+        /// inside the jail. This closes the lexical-only check: a link such
+        /// as "docs" pointing at a directory outside the root would otherwise
+        /// let every operation on "/docs/..." reach outside the jail.
+        /// </summary>
+        private string ResolveComponents(string relativePath, bool followFinalLink)
+        {
+            var current = _rootPath;
+            var remaining = relativePath;
+            var budget = MaximumLinkHops;
+
+            while (true)
+            {
+                remaining = remaining.TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+                if (remaining.Length == 0)
+                    return Path.TrimEndingDirectorySeparator(current);
+
+                var separator = remaining.IndexOfAny([Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar]);
+                string part;
+                if (separator < 0)
+                {
+                    part = remaining;
+                    remaining = string.Empty;
+                }
+                else
+                {
+                    part = remaining[..separator];
+                    remaining = remaining[(separator + 1)..];
+                }
+
+                if (part.Length == 0 || part == ".")
+                    continue;
+                if (part == "..")
+                    throw new UnauthorizedAccessException($"Path '{relativePath}' escapes the SFTP root.");
+
+                var next = Path.Combine(current, part);
+                var isFinal = remaining.Length == 0;
+
+                if (isFinal)
+                {
+                    if (!followFinalLink)
+                        return next;
+
+                    // Follow a link in the final component - this includes
+                    // dangling links, which GetLinkTargetOrNull still
+                    // reports, so CREAT through a link cannot escape.
+                    if (GetLinkTargetOrNull(next, out _) == null)
+                        return next;
+                    return ResolveLinkChain(next, ref budget);
+                }
+
+                var linkTarget = GetLinkTargetOrNull(next, out var exists);
+                if (linkTarget == null)
+                {
+                    if (!exists)
+                    {
+                        // The component does not exist, so nothing after it
+                        // can be a link: compose the remainder lexically and
+                        // keep the jail check.
+                        var composed = Path.GetFullPath(Path.Combine(next, remaining));
+                        if (!IsWithinRoot(_rootPath, composed))
+                            throw new UnauthorizedAccessException($"Path '{relativePath}' escapes the SFTP root.");
+                        return composed;
+                    }
+
+                    current = next;
+                    continue;
+                }
+
+                // Intermediate link: resolve it, then re-resolve the rest of
+                // the path relative to the (verified) target.
+                var resolved = ResolveLinkChain(next, ref budget);
+                var combined = Path.GetFullPath(Path.Combine(resolved, remaining));
+                if (!IsWithinRoot(_rootPath, combined))
+                    throw new UnauthorizedAccessException($"Path '{relativePath}' escapes the SFTP root.");
+
+                remaining = Path.GetRelativePath(_rootPath, combined);
+                current = _rootPath;
+            }
+        }
+
+        /// <summary>
+        /// Follow the chain of links starting at <paramref name="path"/> and
+        /// return the final target. Every hop must stay inside the jail;
+        /// a hop outside is an escape, not something to resolve further.
+        /// </summary>
+        private string ResolveLinkChain(string path, ref int budget)
+        {
+            var current = path;
+            while (true)
+            {
+                var target = GetLinkTargetOrNull(current, out _);
+                if (target == null)
+                    return current;
+
+                if (--budget < 0)
+                    throw new UnauthorizedAccessException("Too many levels of symbolic links.");
+
+                var parent = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(parent))
+                    throw new UnauthorizedAccessException($"Cannot resolve symbolic link '{path}'.");
+
+                current = Path.GetFullPath(Path.IsPathRooted(target)
+                    ? target
+                    : Path.Combine(parent, target));
+                if (!IsWithinRoot(_rootPath, current))
+                    throw new UnauthorizedAccessException($"Path '{path}' escapes the SFTP root through a symbolic link.");
+            }
+        }
+
+        /// <summary>
+        /// Resolve links in the jail root itself. Unlike path components, the
+        /// root is trusted configuration, so no containment check applies.
+        /// </summary>
+        private static string ResolveRootLinks(string path)
+        {
+            var current = path;
+            for (var hop = 0; hop < MaximumLinkHops; hop++)
+            {
+                var target = GetLinkTargetOrNull(current, out _);
+                if (target == null)
+                    return Path.TrimEndingDirectorySeparator(current);
+
+                var parent = Path.GetDirectoryName(current);
+                if (string.IsNullOrEmpty(parent))
+                    return current;
+
+                current = Path.GetFullPath(Path.IsPathRooted(target)
+                    ? target
+                    : Path.Combine(parent, target));
+            }
+
+            throw new UnauthorizedAccessException("Too many levels of symbolic links in the SFTP root.");
+        }
+
+        /// <summary>
+        /// Return the target of the link entry at <paramref name="path"/>, or
+        /// null when the path is not a link. Reads the entry itself (lstat
+        /// semantics), so a dangling link is still reported.
+        /// <paramref name="exists"/> reports whether the entry itself exists,
+        /// so callers can distinguish "regular file" from "missing path"
+        /// without a second metadata syscall.
+        /// </summary>
+        /// <exception cref="UnauthorizedAccessException">The path is a reparse point whose target cannot be verified.</exception>
+        private static string GetLinkTargetOrNull(string path, out bool exists)
+        {
+            FileAttributes attributes;
+            try
+            {
+                attributes = File.GetAttributes(path);
+                exists = true;
+            }
+            catch (FileNotFoundException)
+            {
+                attributes = default;
+                exists = false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                attributes = default;
+                exists = false;
+            }
+
+            if (attributes != default)
+            {
+                if ((attributes & FileAttributes.ReparsePoint) == 0)
+                    return null;
+
+                FileSystemInfo info = (attributes & FileAttributes.Directory) != 0
+                    ? new DirectoryInfo(path)
+                    : new FileInfo(path);
+                var target = info.LinkTarget;
+                if (target == null)
+                {
+                    // Some reparse-point kinds (cloud placeholders, mount
+                    // points) have no readable target. Fail closed rather
+                    // than treat them as regular files.
+                    info = info is DirectoryInfo ? new FileInfo(path) : new DirectoryInfo(path);
+                    target = info.LinkTarget;
+                }
+
+                if (string.IsNullOrEmpty(target))
+                    throw new UnauthorizedAccessException($"Cannot verify the target of link '{path}'.");
+                return target;
+            }
+
+            // The path (or a dangling link entry) is invisible to
+            // GetAttributes. LinkTarget reads the entry directly and reports
+            // a dangling link's target, which is exactly what must be
+            // checked before a CREAT follows it.
+            return new FileInfo(path).LinkTarget ?? new DirectoryInfo(path).LinkTarget;
+        }
+
+        private static bool TryGetAttributes(string path, out FileAttributes attributes)
+        {
+            try
+            {
+                attributes = File.GetAttributes(path);
+                return true;
+            }
+            catch (FileNotFoundException)
+            {
+            }
+            catch (DirectoryNotFoundException)
+            {
+            }
+
+            attributes = default;
+            return false;
         }
 
         /// <summary>
@@ -313,72 +624,96 @@ namespace FxSsh.Services.Sftp
         /// </summary>
         private static bool IsWithinRoot(string root, string path)
         {
-            var rootTrimmed = root.TrimEnd(Path.DirectorySeparatorChar);
+            // Windows paths are case-insensitive; comparing ordinally would
+            // both reject valid paths and weaken the check.
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+
+            var rootTrimmed = Path.TrimEndingDirectorySeparator(root);
             if (rootTrimmed.Length == 0)
-                return true; // jail is the filesystem root: everything is inside
-            return string.Equals(path, rootTrimmed, StringComparison.Ordinal)
-                || path.StartsWith(rootTrimmed + Path.DirectorySeparatorChar, StringComparison.Ordinal);
+                return true;
+
+            if (string.Equals(Path.TrimEndingDirectorySeparator(path), rootTrimmed, comparison))
+                return true;
+
+            // Filesystem root ("/" or "C:\"): everything on it is inside.
+            if (rootTrimmed.EndsWith(Path.DirectorySeparatorChar))
+                return path.StartsWith(rootTrimmed, comparison);
+
+            return path.StartsWith(rootTrimmed + Path.DirectorySeparatorChar, comparison);
         }
 
-        private bool HasReadPermission(string path)
+        private static bool IsSamePath(string left, string right)
         {
-            try
-            {
-                if (File.Exists(path))
-                {
-                    using (File.Open(path, FileMode.Open, FileAccess.Read))
-                        return true;
-                }
-                if (Directory.Exists(path))
-                {
-                    new DirectoryInfo(path).GetFileSystemInfos();
-                    return true;
-                }
-            }
-            catch
-            {
-            }
-            return false;
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            return string.Equals(
+                Path.TrimEndingDirectorySeparator(left),
+                Path.TrimEndingDirectorySeparator(right),
+                comparison);
         }
 
         private static FileSystemInfo GetInfo(string absPath)
         {
             var attributes = File.GetAttributes(absPath);
-            return attributes.HasFlag(FileAttributes.Directory)
+            return (attributes & FileAttributes.Directory) != 0
                 ? new DirectoryInfo(absPath)
                 : new FileInfo(absPath);
         }
 
         private static SftpFileAttributes GetAttr(FileSystemInfo info)
         {
-            try
+            var fileAttributes = info.Attributes;
+            var isLink = (fileAttributes & FileAttributes.ReparsePoint) != 0;
+            var isDir = (fileAttributes & FileAttributes.Directory) != 0;
+
+            var attr = new SftpFileAttributes
             {
-                var isDir = info.Attributes.HasFlag(FileAttributes.Directory);
-                var attr = new SftpFileAttributes
-                {
-                    // 0x4000 is directory, 0x8000 is regular file; 0x01B6 equals 0o666.
-                    Permissions = isDir ? 0x41B6u : 0x81B6u,
-                    AccessTime = (uint)new DateTimeOffset(info.LastAccessTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds(),
-                    ModificationTime = (uint)new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds(),
-                };
-                if (!isDir)
-                    attr.Size = (ulong)new FileInfo(info.FullName).Length;
-                return attr;
-            }
-            catch
-            {
-                return null;
-            }
+                Permissions = GetPermissions(info, isDir, isLink),
+                AccessTime = (uint)new DateTimeOffset(info.LastAccessTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds(),
+                ModificationTime = (uint)new DateTimeOffset(info.LastWriteTimeUtc, TimeSpan.Zero).ToUnixTimeSeconds(),
+            };
+
+            // Never follow a link while filling attributes (LSTAT
+            // semantics; a dangling link has no target to measure).
+            if (!isDir && !isLink && info is FileInfo file)
+                attr.Size = (ulong)file.Length;
+            return attr;
+        }
+
+        /// <summary>
+        /// Report the POSIX type + permission bits. On Unix the real mode is
+        /// read from the entry; links report the conventional 0777 because
+        /// their own mode is not exposed. Windows has no POSIX mode, so a
+        /// conventional 0755/0644 is reported.
+        /// </summary>
+        private static uint GetPermissions(FileSystemInfo info, bool isDir, bool isLink)
+        {
+            if (isLink)
+                return 0xA1FFu; // 0xA000 | 0777
+            if (OperatingSystem.IsWindows())
+                return isDir ? 0x41EDu : 0x81A4u; // 0x4000/0x8000 | 0755/0644
+
+            var mode = (uint)File.GetUnixFileMode(info.FullName) & 0x1FFu;
+            return (isDir ? 0x4000u : 0x8000u) | mode;
         }
 
         private static void ApplyAttr(FileSystemInfo info, SftpFileAttributes attr)
         {
             if (attr == null)
                 return;
-            if (attr.AccessTime != null)
-                info.LastAccessTimeUtc = DateTimeOffset.FromUnixTimeSeconds(attr.AccessTime.Value).UtcDateTime;
-            if (attr.ModificationTime != null)
-                info.LastWriteTimeUtc = DateTimeOffset.FromUnixTimeSeconds(attr.ModificationTime.Value).UtcDateTime;
+
+            if (attr.Permissions is { } permissions && !OperatingSystem.IsWindows())
+            {
+                // Only apply the low nine permission bits; the file type in
+                // the high bits is informational and cannot be changed.
+                var type = permissions & 0xF000u;
+                if (type == 0 || type == 0x4000u || type == 0x8000u)
+                    File.SetUnixFileMode(info.FullName, (UnixFileMode)(permissions & 0x1FFu));
+            }
+
             if (attr.Size != null && info is FileInfo file)
             {
                 // Truncate/extend the file to the requested size (section 6.9).
@@ -387,6 +722,13 @@ namespace FxSsh.Services.Sftp
                 using var fs = new FileStream(file.FullName, FileMode.Open, FileAccess.Write, FileShare.Read | FileShare.Write | FileShare.Delete);
                 fs.SetLength((long)attr.Size.Value);
             }
+
+            // Times last: truncation and chmod above would otherwise update
+            // the timestamps the client asked for.
+            if (attr.AccessTime != null)
+                info.LastAccessTimeUtc = DateTimeOffset.FromUnixTimeSeconds(attr.AccessTime.Value).UtcDateTime;
+            if (attr.ModificationTime != null)
+                info.LastWriteTimeUtc = DateTimeOffset.FromUnixTimeSeconds(attr.ModificationTime.Value).UtcDateTime;
         }
 
         private sealed class LocalFileHandle : ISftpFileHandle
@@ -433,39 +775,47 @@ namespace FxSsh.Services.Sftp
             public void Dispose() => _fs.Dispose();
         }
 
+        /// <summary>
+        /// Lazily enumerates the directory: entries are pulled on demand in
+        /// READDIR-sized batches instead of materializing the whole listing,
+        /// so a huge directory cannot exhaust memory on OPENDIR.
+        /// </summary>
         private sealed class LocalDirectoryHandle : ISftpDirectoryHandle
         {
-            private readonly FileSystemInfo[] _entries;
-            private int _cursor;
+            private readonly IEnumerator<FileSystemInfo> _enumerator;
+            private bool _finished;
 
             public LocalDirectoryHandle(string absPath)
             {
-                _entries = new DirectoryInfo(absPath).GetFileSystemInfos();
+                _enumerator = new DirectoryInfo(absPath).EnumerateFileSystemInfos().GetEnumerator();
             }
 
             public SftpFileEntry[] ReadEntries(int maxCount)
             {
-                if (_cursor >= _entries.Length)
+                if (maxCount <= 0 || _finished)
                     return Array.Empty<SftpFileEntry>();
 
-                var count = Math.Min(maxCount, _entries.Length - _cursor);
-                var result = new SftpFileEntry[count];
-                for (var i = 0; i < count; i++)
+                var result = new List<SftpFileEntry>(Math.Min(maxCount, 256));
+                while (result.Count < maxCount)
                 {
-                    var info = _entries[_cursor + i];
-                    result[i] = new SftpFileEntry
+                    if (!_enumerator.MoveNext())
+                    {
+                        _finished = true;
+                        break;
+                    }
+
+                    var info = _enumerator.Current;
+                    result.Add(new SftpFileEntry
                     {
                         FileName = info.Name,
                         Attributes = GetAttr(info),
-                    };
+                    });
                 }
-                _cursor += count;
-                return result;
+
+                return result.ToArray();
             }
 
-            public void Dispose()
-            {
-            }
+            public void Dispose() => _enumerator.Dispose();
         }
     }
 }

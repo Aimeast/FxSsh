@@ -10,6 +10,9 @@ namespace FxSsh.Services.Sftp
     /// </summary>
     public sealed class SftpFileAttributes
     {
+        /// <summary>Upper bound for the EXTENDED_ATTRIBUTES count accepted from the wire.</summary>
+        private const uint MaximumExtendedAttributes = 256;
+
         private const uint AttrSize = 0x00000001;
         private const uint AttrUidGid = 0x00000002;
         private const uint AttrPermissions = 0x00000004;
@@ -69,6 +72,12 @@ namespace FxSsh.Services.Sftp
             if ((flags & AttrExtended) != 0)
             {
                 var count = reader.ReadUInt32();
+                // Never allocate from an untrusted count: each pair needs at
+                // least two length prefixes, and the draft puts no practical
+                // use on more than a handful of extensions.
+                if (count > MaximumExtendedAttributes || count > reader.DataAvailable / 8)
+                    throw new ArgumentException("Invalid extended-attribute count.", nameof(reader));
+
                 var extended = new (string, string)[count];
                 for (var i = 0; i < count; i++)
                 {

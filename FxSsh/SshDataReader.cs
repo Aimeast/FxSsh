@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers.Binary;
 using System.Text;
 
 namespace FxSsh
@@ -58,8 +59,7 @@ namespace FxSsh
         /// <returns>The value read.</returns>
         public uint ReadUInt32()
         {
-            var span = ReadBytesAsMemory(4).Span;
-            return (uint)(span[0] << 24 | span[1] << 16 | span[2] << 8 | span[3]);
+            return BinaryPrimitives.ReadUInt32BigEndian(ReadBytesAsMemory(4).Span);
         }
 
         /// <summary>
@@ -69,9 +69,7 @@ namespace FxSsh
         /// <returns>The value read.</returns>
         public ulong ReadUInt64()
         {
-            var span = ReadBytesAsMemory(8).Span;
-            return ((ulong)span[0] << 56 | (ulong)span[1] << 48 | (ulong)span[2] << 40 | (ulong)span[3] << 32 |
-                    (ulong)span[4] << 24 | (ulong)span[5] << 16 | (ulong)span[6] << 8 | span[7]);
+            return BinaryPrimitives.ReadUInt64BigEndian(ReadBytesAsMemory(8).Span);
         }
 
         /// <summary>
@@ -87,7 +85,10 @@ namespace FxSsh
         /// </exception>
         public ReadOnlyMemory<byte> ReadBytesAsMemory(int length)
         {
-            if (_position + length > _bytes.Length)
+            // Written without addition so a hostile length cannot overflow
+            // int and slip past the bounds check (a uint32 length cast to a
+            // negative int is rejected by the same condition).
+            if (length < 0 || length > _bytes.Length - _position)
                 throw new ArgumentOutOfRangeException(nameof(length));
 
             var bytes = _bytes.Slice(_position, length);

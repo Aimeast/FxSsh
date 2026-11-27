@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Security.Cryptography;
 using FxSsh.Logging;
 using FxSsh.Messages;
 using FxSsh.Messages.UserAuth;
@@ -32,6 +33,13 @@ namespace FxSsh.Services
         public bool EnableNoneAuth { get; set; } = false;
 
         /// <summary>
+        /// Gets a value indicating whether an authentication attempt has
+        /// already succeeded. Once true, further userauth requests are
+        /// ignored (RFC 4252 section 5.1) until the session ends.
+        /// </summary>
+        internal bool IsAuthenticated { get; private set; }
+
+        /// <summary>
         /// Raised for every authentication attempt with the credentials the
         /// client presented ("password", "publickey" or "none"). The handler
         /// must set <see cref="UserAuthArgs.Result"/> to true to accept; with
@@ -61,12 +69,26 @@ namespace FxSsh.Services
             // Concrete RequestMessage subclasses are matched before the
             // RequestMessage base, mirroring the old most-specific-overload
             // dynamic binding.
-            switch (message)
+            //
+            // Malformed request payloads (bad key blobs, truncated strings,
+            // invalid signature encodings) must reject the attempt with
+            // SSH_MSG_USERAUTH_FAILURE, not tear the whole session down.
+            try
             {
-                case NoneRequestMessage m: HandleMessage(m); break;
-                case PasswordRequestMessage m: HandleMessage(m); break;
-                case PublicKeyRequestMessage m: HandleMessage(m); break;
-                case RequestMessage m: HandleMessage(m); break;
+                switch (message)
+                {
+                    case NoneRequestMessage m: HandleMessage(m); break;
+                    case PasswordRequestMessage m: HandleMessage(m); break;
+                    case PublicKeyRequestMessage m: HandleMessage(m); break;
+                    case RequestMessage m: HandleMessage(m); break;
+                }
+            }
+            catch (Exception ex) when (ex is ArgumentException or CryptographicException
+                or FormatException or IndexOutOfRangeException or InvalidOperationException
+                or OverflowException)
+            {
+                Log.Warn($"Malformed userauth request ({message.GetType().Name}): {ex.Message}");
+                _session.TrySendMessage(new FailureMessage());
             }
         }
 
@@ -108,6 +130,7 @@ namespace FxSsh.Services
             if (verifed)
             {
                 Log.Info($"Auth succeeded: none, user {message.Username}.");
+                IsAuthenticated = true;
                 _session.RegisterService(message.ServiceName, args);
                 Succeed?.Invoke(this, message.ServiceName);
                 _session.SendMessage(new SuccessMessage());
@@ -134,6 +157,7 @@ namespace FxSsh.Services
             if (verifed)
             {
                 Log.Info($"Auth succeeded: password, user {message.Username}.");
+                IsAuthenticated = true;
                 _session.RegisterService(message.ServiceName, args);
 
                 Succeed?.Invoke(this, message.ServiceName);
@@ -155,58 +179,68 @@ namespace FxSsh.Services
                 var verifed = false;
 
                 var keyAlg = _session._publicKeyAlgorithms[message.KeyAlgorithmName](null);
-                keyAlg.LoadKeyAndCertificatesData(message.PublicKey);
-
-                var args = new UserAuthArgs(base._session, message.Username, message.KeyAlgorithmName, keyAlg.GetFingerprint(), message.PublicKey);
-                UserAuth?.Invoke(this, args);
-                verifed = args.Result;
-
-                Log.Info($"Public key auth: user={message.Username} alg={message.KeyAlgorithmName} fp={args.Fingerprint}.");
-
-                if (!verifed)
+                try
                 {
-                    Log.Warn($"Public key auth rejected by host policy: user {message.Username}.");
-                    _session.SendMessage(new FailureMessage());
-                    return;
-                }
+                    keyAlg.LoadKeyAndCertificatesData(message.PublicKey);
 
-                if (!message.HasSignature)
+                    var args = new UserAuthArgs(base._session, message.Username, message.KeyAlgorithmName, keyAlg.GetFingerprint(), message.PublicKey);
+                    UserAuth?.Invoke(this, args);
+                    verifed = args.Result;
+
+                    Log.Info($"Public key auth: user={message.Username} alg={message.KeyAlgorithmName} fp={args.Fingerprint}.");
+
+                    if (!verifed)
+                    {
+                        Log.Warn($"Public key auth rejected by host policy: user {message.Username}.");
+                        _session.SendMessage(new FailureMessage());
+                        return;
+                    }
+
+                    if (!message.HasSignature)
+                    {
+                        Log.Debug("Public key accepted, awaiting signature.");
+                        _session.SendMessage(new PublicKeyOkMessage { KeyAlgorithmName = message.KeyAlgorithmName, PublicKey = message.PublicKey });
+                        return;
+                    }
+
+                    var sig = keyAlg.GetSignature(message.Signature);
+
+                    // A signed request can only be verified against an established
+                    // session id; one arriving before key exchange is malformed
+                    // and is rejected instead of dereferencing a null id.
+                    if (_session.SessionId == null)
+                    {
+                        Log.Warn($"Public key signature received before key exchange: user {message.Username}.");
+                        _session.SendMessage(new FailureMessage());
+                        return;
+                    }
+
+                    var bytes = new SshDataWriter(4 + _session.SessionId.Length + message.PayloadWithoutSignature.Length)
+                        .WriteBinary(_session.SessionId)
+                        .WriteBytes(message.PayloadWithoutSignature)
+                        .ToByteArray();
+
+                    verifed = keyAlg.VerifyData(bytes, sig);
+
+                    if (!verifed)
+                    {
+                        Log.Warn($"Public key signature verification failed: user {message.Username}.");
+                        _session.SendMessage(new FailureMessage());
+                        return;
+                    }
+
+                    Log.Info($"Auth succeeded: publickey, user {message.Username}.");
+                    IsAuthenticated = true;
+                    _session.RegisterService(message.ServiceName, args);
+                    Succeed?.Invoke(this, message.ServiceName);
+                    _session.SendMessage(new SuccessMessage());
+                }
+                finally
                 {
-                    Log.Debug("Public key accepted, awaiting signature.");
-                    _session.SendMessage(new PublicKeyOkMessage { KeyAlgorithmName = message.KeyAlgorithmName, PublicKey = message.PublicKey });
-                    return;
+                    // The key instance is created per request; release the
+                    // imported native key handle as soon as the request ends.
+                    keyAlg.Dispose();
                 }
-
-                var sig = keyAlg.GetSignature(message.Signature);
-
-                // A signed request can only be verified against an established
-                // session id; one arriving before key exchange is malformed
-                // and is rejected instead of dereferencing a null id.
-                if (_session.SessionId == null)
-                {
-                    Log.Warn($"Public key signature received before key exchange: user {message.Username}.");
-                    _session.SendMessage(new FailureMessage());
-                    return;
-                }
-
-                var bytes = new SshDataWriter(4 + _session.SessionId.Length + message.PayloadWithoutSignature.Length)
-                    .WriteBinary(_session.SessionId)
-                    .WriteBytes(message.PayloadWithoutSignature)
-                    .ToByteArray();
-
-                verifed = keyAlg.VerifyData(bytes, sig);
-
-                if (!verifed)
-                {
-                    Log.Warn($"Public key signature verification failed: user {message.Username}.");
-                    _session.SendMessage(new FailureMessage());
-                    return;
-                }
-
-                Log.Info($"Auth succeeded: publickey, user {message.Username}.");
-                _session.RegisterService(message.ServiceName, args);
-                Succeed?.Invoke(this, message.ServiceName);
-                _session.SendMessage(new SuccessMessage());
             }
             else
             {

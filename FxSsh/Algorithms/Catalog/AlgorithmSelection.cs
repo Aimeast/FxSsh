@@ -13,6 +13,7 @@ namespace FxSsh.Algorithms.Catalog
     public class AlgorithmSelection
     {
         private readonly AlgorithmCatalog _catalog = new();
+        private readonly object _buildLocker = new();
         private bool _built = false;
 
         /// <summary>
@@ -56,16 +57,20 @@ namespace FxSsh.Algorithms.Catalog
         /// mutable catalog is handed to the callback, so a caller that kept
         /// the reference could still mutate it before the catalog is frozen
         /// at server start. Do not retain the catalog beyond the callback.
-        /// Configuration and BuildSelection are expected to run on a single
-        /// thread (server setup); no synchronization is provided.
+        /// Configuration and BuildSelection are serialized; the callback must
+        /// not re-enter this selection (for example by calling
+        /// BuildSelection), since that would deadlock on the same lock.
         /// </remarks>
         public void ConfigureHazmat(Action<AlgorithmCatalog> configure)
         {
             ArgumentNullException.ThrowIfNull(configure);
 
-            if (_built)
-                throw new InvalidOperationException("ConfigureHazmat may only be called before the server starts.");
-            configure(_catalog);
+            lock (_buildLocker)
+            {
+                if (_built)
+                    throw new InvalidOperationException("ConfigureHazmat may only be called before the server starts.");
+                configure(_catalog);
+            }
         }
 
         /// <summary>
@@ -76,15 +81,30 @@ namespace FxSsh.Algorithms.Catalog
         /// </summary>
         internal void BuildSelection(Action<AlgorithmCatalog> logger)
         {
-            if (_built)
-                return;
-            _built = true;
-            logger?.Invoke(_catalog);
-            HostKeySelection = _catalog.HostKeyCollection.BuildCollection();
-            KeyExchangeSelection = _catalog.KeyExchangeCollection.BuildCollection();
-            EncryptionSelection = _catalog.EncryptionCollection.BuildCollection();
-            HmacSelection = _catalog.HmacCollection.BuildCollection();
-            CompressionSelection = _catalog.CompressionCollection.BuildCollection();
+            lock (_buildLocker)
+            {
+                if (_built)
+                    return;
+
+                logger?.Invoke(_catalog);
+
+                // Build every category into locals first: if any BuildCollection
+                // fails, the selection is not marked built and a retry (or the
+                // next Start) sees a fully initialized object instead of a
+                // half-frozen one with null selections.
+                var hostKey = _catalog.HostKeyCollection.BuildCollection();
+                var keyExchange = _catalog.KeyExchangeCollection.BuildCollection();
+                var encryption = _catalog.EncryptionCollection.BuildCollection();
+                var hmac = _catalog.HmacCollection.BuildCollection();
+                var compression = _catalog.CompressionCollection.BuildCollection();
+
+                HostKeySelection = hostKey;
+                KeyExchangeSelection = keyExchange;
+                EncryptionSelection = encryption;
+                HmacSelection = hmac;
+                CompressionSelection = compression;
+                _built = true;
+            }
         }
     }
 }

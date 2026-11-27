@@ -106,32 +106,6 @@ namespace FxSsh.Tests.Catalog
         }
 
         [TestMethod]
-        public void AddAlias_requires_an_existing_target()
-        {
-            Assert.ThrowsExactly<KeyNotFoundException>(
-                () => CreateBuilder().AddAlias("alias", "missing-target"));
-        }
-
-        [TestMethod]
-        public void AddAlias_shares_the_target_factory_and_is_negotiable()
-        {
-            var builder = CreateBuilder();
-            object shared = new();
-            builder.Add("target", _ => shared);
-
-            builder.AddAlias("alias", "target");
-
-            CollectionAssert.AreEqual(new[] { "target", "alias" }, builder.Names.ToArray());
-            CollectionAssert.AreEqual(new[] { "target", "alias" }, builder.NegotiableNames.ToArray());
-
-            // The alias delegates to the target's factory, so both names
-            // resolve to instances produced by the same factory.
-            var frozen = builder.BuildCollection();
-            Assert.AreSame(shared, frozen["target"](null!));
-            Assert.AreSame(shared, frozen["alias"](null!));
-        }
-
-        [TestMethod]
         public void BuildCollection_excludes_unsupported_entries()
         {
             var builder = CreateBuilder();
@@ -155,6 +129,33 @@ namespace FxSsh.Tests.Catalog
             Assert.IsTrue(frozen.ContainsKey("a"));
             Assert.IsFalse(frozen.ContainsKey("b"));
             Assert.AreEqual(1, frozen.Count);
+        }
+
+        [TestMethod]
+        public void AddAlias_snapshots_the_target_and_is_negotiable_under_its_own_name()
+        {
+            var builder = CreateBuilder();
+            object shared = new();
+            builder.Add("target", _ => shared);
+
+            builder.AddAlias("alias", "target");
+
+            // The alias appends after the target, reuses its factory and
+            // enters negotiation under its own name.
+            CollectionAssert.AreEqual(new[] { "target", "alias" }, builder.Names.ToArray());
+            Assert.AreSame(shared, builder.BuildCollection()["alias"](null!));
+
+            // The alias snapshots the target at creation time: later target
+            // edits do not affect it.
+            builder.Disable("target");
+            Assert.IsTrue(builder.BuildCollection().ContainsKey("alias"));
+            Assert.IsFalse(builder.BuildCollection().ContainsKey("target"));
+        }
+
+        [TestMethod]
+        public void AddAlias_unknown_target_throws()
+        {
+            Assert.ThrowsExactly<KeyNotFoundException>(() => CreateBuilder().AddAlias("alias", "missing"));
         }
 
         [TestMethod]

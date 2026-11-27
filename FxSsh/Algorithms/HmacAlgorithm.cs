@@ -20,11 +20,12 @@ namespace FxSsh.Algorithms
     /// for cold paths (key exchange) but rewritten to delegate to the same
     /// Span-based core, so there is exactly one MAC implementation.
     /// </summary>
-    public class HmacAlgorithm
+    public class HmacAlgorithm : IDisposable
     {
         private readonly KeyedHashAlgorithm _algorithm;
         private readonly byte[] _key;
         private readonly int _digestLength;
+        private bool _disposed;
 
         // Dispatch token: which static HashData to invoke. Avoids re-testing
         // the runtime type on every per-packet MAC.
@@ -47,7 +48,7 @@ namespace FxSsh.Algorithms
         /// that computes MACs with the supplied keyed hash algorithm. The
         /// digest length is derived from the algorithm's hash size.
         /// </summary>
-        /// <param name="algorithm">The keyed hash algorithm that performs the MAC computation, such as <see cref="HMACSHA256"/> or <see cref="HMACSHA512"/>.</param>
+        /// <param name="algorithm">The keyed hash algorithm that performs the MAC computation, such as <see cref="HMACSHA256"/> or <see cref="HMACSHA512"/>. The instance is owned by this MAC and disposed with it; pass a fresh instance per direction.</param>
         /// <param name="keySize">The MAC key size in bits; must equal the length of <paramref name="key"/> in bits.</param>
         /// <param name="key">The MAC key derived by key exchange.</param>
         /// <exception cref="ArgumentNullException"><paramref name="algorithm"/> or <paramref name="key"/> is <c>null</c>.</exception>
@@ -87,6 +88,7 @@ namespace FxSsh.Algorithms
         /// </summary>
         public byte[] ComputeHash(byte[] input)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             ArgumentNullException.ThrowIfNull(input);
             var dest = new byte[_digestLength];
             ComputeHashCore(ReadOnlySpan<byte>.Empty, input, 0u, dest);
@@ -103,6 +105,7 @@ namespace FxSsh.Algorithms
         /// </summary>
         public byte[] ComputeHash(byte[] a, byte[] b, uint sequence)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             ArgumentNullException.ThrowIfNull(a);
             ArgumentNullException.ThrowIfNull(b);
             var dest = new byte[_digestLength];
@@ -124,6 +127,7 @@ namespace FxSsh.Algorithms
         /// </summary>
         public virtual void ComputeHash(ReadOnlySpan<byte> a, ReadOnlySpan<byte> b, uint sequence, Span<byte> destination)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (destination.Length < _digestLength)
                 throw new ArgumentException("Destination too short for MAC.", nameof(destination));
             ComputeHashCore(a, b, sequence, destination);
@@ -174,12 +178,27 @@ namespace FxSsh.Algorithms
         // pool. The rental is returned before return; a and b were already in
         // the receive buffer (hot path), so the copies here are the
         // unavoidable concat into the pooled slot, not an extra allocation.
+        // Small control packets stay on the stack and skip the pool entirely.
+        private const int StackConcatLimit = 512;
+
         private void HashConcat(
             ReadOnlySpan<byte> seq, ReadOnlySpan<byte> a, ReadOnlySpan<byte> b,
             Span<byte> dest,
             HashDataDelegate hash)
         {
             var total = checked(4 + a.Length + b.Length);
+
+            if (total <= StackConcatLimit)
+            {
+                Span<byte> stack = stackalloc byte[StackConcatLimit];
+                var concat = stack[..total];
+                seq.CopyTo(concat);
+                a.CopyTo(concat[4..]);
+                b.CopyTo(concat[(4 + a.Length)..]);
+                hash(_key, concat, dest);
+                return;
+            }
+
             var rental = SshBuffers.Packets.Rent(total);
             try
             {
@@ -202,5 +221,19 @@ namespace FxSsh.Algorithms
         // implicitly converted to ReadOnlySpan<byte> at the call site without
         // an extra local.
         private delegate int HashDataDelegate(ReadOnlySpan<byte> key, ReadOnlySpan<byte> source, Span<byte> destination);
+
+        /// <summary>
+        /// Releases the negotiated MAC's hash instance. The Session disposes
+        /// the previous algorithm set on rekey and the current set on
+        /// teardown, so the native hash handle is not left to the finalizer.
+        /// Plugin MACs with additional resources can override this method.
+        /// </summary>
+        public virtual void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            _algorithm?.Dispose();
+        }
     }
 }

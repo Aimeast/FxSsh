@@ -35,7 +35,7 @@ namespace FxSsh.Algorithms
     /// The sequence number passed in by Session is not used (RFC 5647 keys
     /// the nonce off the IV, not the packet sequence number).
     /// </summary>
-    public sealed class GcmModeCryptoTransform : IAeadTransform
+    public sealed class GcmModeCryptoTransform : IAeadTransform, IDisposable
     {
         private readonly AesGcm _gcm;
         // Reused 12-byte nonce: [0..4] is the fixed field (set once from the
@@ -43,6 +43,7 @@ namespace FxSsh.Algorithms
         private readonly byte[] _nonce = new byte[12];
         private readonly byte[] _counter;   // 8-byte big-endian invocation counter
         private readonly int _tagBytes = 16;
+        private bool _disposed;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="GcmModeCryptoTransform"/> class,
@@ -80,7 +81,10 @@ namespace FxSsh.Algorithms
         /// pass-through of the 4 bytes as a big-endian length.
         /// </summary>
         public int DecryptPacketLength(uint sequenceNumber, ReadOnlySpan<byte> encryptedLength)
-            => encryptedLength[0] << 24 | encryptedLength[1] << 16 | encryptedLength[2] << 8 | encryptedLength[3];
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return encryptedLength[0] << 24 | encryptedLength[1] << 16 | encryptedLength[2] << 8 | encryptedLength[3];
+        }
 
         /// <summary>
         /// Encrypt one SSH packet straight into <paramref name="destination"/>:
@@ -97,6 +101,7 @@ namespace FxSsh.Algorithms
         /// </summary>
         public void Encrypt(uint sequenceNumber, ReadOnlySpan<byte> frame, Span<byte> destination)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (destination.Length < frame.Length + _tagBytes)
                 throw new ArgumentException("Destination too short for GCM ciphertext and tag.", nameof(destination));
 
@@ -125,6 +130,7 @@ namespace FxSsh.Algorithms
         /// </summary>
         public void Decrypt(uint sequenceNumber, ReadOnlySpan<byte> lengthField, ReadOnlySpan<byte> ciphertextWithTag, Span<byte> plaintextDestination)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             if (ciphertextWithTag.Length < _tagBytes)
                 throw new ArgumentException("GCM ciphertext shorter than tag.", nameof(ciphertextWithTag));
             var plaintextLength = ciphertextWithTag.Length - _tagBytes;
@@ -159,6 +165,19 @@ namespace FxSsh.Algorithms
                     return;
             }
             throw new InvalidOperationException("AES-GCM invocation counter exhausted (2^64 packets); re-key required.");
+        }
+
+        /// <summary>
+        /// Releases the native AES-GCM context. The session disposes the
+        /// negotiated algorithm set on rekey and teardown instead of relying
+        /// on finalizers to release the cipher handle.
+        /// </summary>
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            _gcm.Dispose();
         }
     }
 }

@@ -62,7 +62,7 @@ FxSsh 遵循以下 RFC 文档：
 - `FxSsh.Tests` &mdash; 单元测试
 - `FxSsh.IntegrationTests` &mdash; 由真实 OpenSSH 客户端驱动的端到端测试
 
-CI 在每次推送到 `dev` 和每个 PR 时，于 Ubuntu 与 Windows 上运行这两套测试，把四份覆盖率文件合并为一份综合报告，并发布到工作流运行页面的摘要区（见 **Actions** 标签页）。完整的 HTML 报告可在该运行的 `coverage-report` 工件中下载。
+CI 在每次推送到 `dev` 或 `test` 和每个 PR 时，于 Ubuntu 与 Windows 上运行这两套测试，把四份覆盖率文件合并为一份综合报告，并发布到工作流运行页面的摘要区（见 **Actions** 标签页）。完整的 HTML 报告可在该运行的 `coverage-report` 工件中下载。
 
 ### 示例代码
 
@@ -221,6 +221,12 @@ static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
     catch (ObjectDisposedException)
     {
     }
+    catch (InvalidOperationException ex)
+    {
+        // 背压：发送积压达到上限。停止向该通道喂数据，
+        // 而不是对着满积压重试。
+        Log.Warn($"Channel {channel.ServerChannelId} backpressure: {ex.Message}");
+    }
     catch (Exception)
     {
         // 通道/会话在发送中途被销毁；无需再做处理。
@@ -252,10 +258,18 @@ static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
         return;
 
     var tcp = new TcpForwardService(e.Host, e.Port, e.OriginatorIP, e.OriginatorPort);
+    // Channel.DataReceived 传入的是池化接收缓冲的临时视图：仅在同步回调内
+    // 有效，跨 await 使用前必须先复制（ToArray()）。
     e.Channel.DataReceived += (ss, ee) => tcp.OnData(ee);
+    e.Channel.EofReceived += (ss, ee) => tcp.OnClose();
     e.Channel.CloseReceived += (ss, ee) => tcp.OnClose();
+    e.Channel.ForceClosed += (ss, ee) => tcp.OnClose();
     tcp.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-    tcp.CloseReceived += (ss, ee) => e.Channel.SendClose();
+    // 等已接受的数据全部成帧后再关闭，避免 CLOSE 超过目标的最后一段响应。
+    tcp.CloseReceived += async (ss, ee) =>
+    {
+        try { await e.Channel.SendCloseAsync(); } catch { }
+    };
     tcp.Start();
 }
 
@@ -289,6 +303,8 @@ static void service_SubsystemRequested(object sender, SubsystemRequestedArgs e)
     e.Agreed = true;
     // 默认 SFTP 根目录为当前用户的主目录。
     // 如需只读服务，请使用：new SftpService(readOnly: true);
+    // 内置路径 jail 是尽力而为的；若本地用户可在根目录内创建链接，
+    // 请同时使用操作系统级隔离。
     var sftp = new SftpService();
     sftp.Attach(e.Channel);
 }
@@ -310,10 +326,18 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
         var terminal = TerminalFactory.Create(shell, windowWidth, windowHeight, ptyModes);
 
         e.Channel.WindowChange += (ss, ee) => terminal.Resize((int)ee.WidthColumns, (int)ee.HeightRows);
+        // 下面的 await 之所以安全，是因为 TryTerminalInputAsync 会先复制
+        // 负载：DataReceived 的视图只在同步回调内有效。
         e.Channel.DataReceived += async (ss, ee) => await TryTerminalInputAsync(terminal, ee);
         e.Channel.CloseReceived += (ss, ee) => terminal.OnClose();
+        e.Channel.ForceClosed += (ss, ee) => terminal.OnClose();
+        // 不接 EofReceived：交互式终端没有半关闭 API，客户端的 EOF 不应终止 shell。
         terminal.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-        terminal.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
+        // 把关闭排在已在途的终端输出之后，否则可能截断 shell 的最后一段输出。
+        terminal.CloseReceived += async (ss, ee) =>
+        {
+            try { await e.Channel.SendCloseAsync(ee); } catch { }
+        };
 
         terminal.Run();
     }
@@ -326,10 +350,20 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
 
         var git = new GitService(command, project);
 
+        // git.OnData 在任何 await 之前同步复制——DataReceived 的临时视图
+        // 不能用到回调之外。
         e.Channel.DataReceived += (ss, ee) => git.OnData(ee);
+        // 客户端半关闭（SSH_MSG_CHANNEL_EOF）表示请求流结束：关闭子进程
+        // stdin，让 git 冲刷响应并退出，而不是永远等待输入。
+        e.Channel.EofReceived += (ss, ee) => git.OnClose();
         e.Channel.CloseReceived += (ss, ee) => git.OnClose();
+        e.Channel.ForceClosed += (ss, ee) => git.OnClose();
         git.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-        git.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
+        // 子进程输出刷新完后再上报退出状态。
+        git.CloseReceived += async (ss, ee) =>
+        {
+            try { await e.Channel.SendCloseAsync(ee); } catch { }
+        };
 
         git.Start();
     }

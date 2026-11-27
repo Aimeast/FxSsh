@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -22,10 +23,17 @@ namespace FxSsh.Algorithms
         // consecutive counter blocks are built in one shot and encrypted with
         // a single TransformBlock call, instead of one AES invocation per
         // 16-byte block (a 32KB SSH packet previously triggered ~2048
-        // cascading managed-to-native AES calls). 64KB covers every SSH
-        // packet (hard cap 35000 bytes) plus slack; a fallback path keeps the
-        // original per-block semantics for larger inputs.
-        private readonly byte[] _ks;
+        // cascading managed-to-native AES calls). The SSH packet cap is
+        // 35000 bytes; a fallback path keeps the original per-block semantics
+        // for larger inputs (e.g. plugin use outside the SSH framing).
+        //
+        // Allocated lazily: a session that negotiates CTR but never carries
+        // data (idle connections, banner-only probes) must not pin 35 KiB per
+        // direction. The transform is used by one direction of one session,
+        // so the lazy store needs no synchronization beyond the session's
+        // existing serialization of sends/receives.
+        private byte[] _ks;
+        private bool _disposed;
 
 
         /// <summary>
@@ -45,7 +53,6 @@ namespace FxSsh.Algorithms
             _transform = algorithm.CreateEncryptor();
             _iv = algorithm.IV;
             _block = new byte[algorithm.BlockSize >> 3];
-            _ks = new byte[1 << 16];
         }
 
         /// <summary>Gets a value indicating whether the transform can be reused (always true; the CTR state is carried entirely in the counter).</summary>
@@ -84,6 +91,8 @@ namespace FxSsh.Algorithms
         /// <returns>The number of bytes processed, rounded up to whole cipher blocks.</returns>
         public int TransformBlock(byte[] inputBuffer, int inputOffset, int inputCount, byte[] outputBuffer, int outputOffset)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+
             var bytesPerBlock = InputBlockSize >> 3;
             var blocks = (inputCount + bytesPerBlock - 1) / bytesPerBlock;
             var ksLen = blocks * bytesPerBlock;
@@ -93,17 +102,43 @@ namespace FxSsh.Algorithms
             // XOR in 8-byte (ulong) chunks. Mathematically identical to the
             // per-block loop - same keystream, same counter carry - so the
             // byte stream is unchanged.
-            if (ksLen <= _ks.Length)
+            var ks = _ks ??= new byte[Session.MaximumPacketLength + 16];
+            if (ksLen <= ks.Length)
             {
-                for (var b = 0; b < blocks; b++)
+                if (bytesPerBlock == 16)
                 {
-                    Buffer.BlockCopy(_iv, 0, _ks, b * bytesPerBlock, bytesPerBlock);
-                    var k = _iv.Length;
-                    while (--k >= 0 && ++_iv[k] == 0) ;
+                    // AES: the counter is two big-endian 64-bit halves, so
+                    // each block is two 8-byte stores instead of a 16-byte
+                    // copy plus a per-byte carry loop (~2048 copies for a
+                    // 32 KiB packet).
+                    var high = BinaryPrimitives.ReadUInt64BigEndian(_iv);
+                    var low = BinaryPrimitives.ReadUInt64BigEndian(_iv.AsSpan(8));
+                    var keystream = ks.AsSpan(0, ksLen);
+                    for (var b = 0; b < blocks; b++)
+                    {
+                        var offset = b * 16;
+                        BinaryPrimitives.WriteUInt64BigEndian(keystream[offset..], high);
+                        BinaryPrimitives.WriteUInt64BigEndian(keystream[(offset + 8)..], low);
+                        if (++low == 0)
+                            high++;
+                    }
+                    BinaryPrimitives.WriteUInt64BigEndian(_iv, high);
+                    BinaryPrimitives.WriteUInt64BigEndian(_iv.AsSpan(8), low);
+                }
+                else
+                {
+                    // Non-AES block sizes (unused by the built-in catalog):
+                    // keep the generic big-endian counter loop.
+                    for (var b = 0; b < blocks; b++)
+                    {
+                        Buffer.BlockCopy(_iv, 0, ks, b * bytesPerBlock, bytesPerBlock);
+                        var k = _iv.Length;
+                        while (--k >= 0 && ++_iv[k] == 0) ;
+                    }
                 }
 
                 // Single native AES-ECB invocation over all counter blocks.
-                _transform.TransformBlock(_ks, 0, ksLen, _ks, 0);
+                _transform.TransformBlock(ks, 0, ksLen, ks, 0);
 
                 // XOR 8 bytes at a time, then the byte tail. Uses
                 // ReadUnaligned/WriteUnaligned because the input/output spans
@@ -111,7 +146,7 @@ namespace FxSsh.Algorithms
                 // Transform(..., offset 4, ...)); MemoryMarshal.Cast would
                 // throw on a misaligned span. x64 unaligned ulong access is
                 // as fast as aligned, so there is no throughput cost.
-                ref var ksRef = ref MemoryMarshal.GetReference(_ks.AsSpan(0, ksLen));
+                ref var ksRef = ref MemoryMarshal.GetReference(ks.AsSpan(0, ksLen));
                 ref var srcRef = ref MemoryMarshal.GetReference(inputBuffer.AsSpan(inputOffset, inputCount));
                 ref var dstRef = ref MemoryMarshal.GetReference(outputBuffer.AsSpan(outputOffset, inputCount));
 
@@ -172,6 +207,9 @@ namespace FxSsh.Algorithms
         /// <summary>Releases the resources used by the current transform, including the underlying ECB encryptor.</summary>
         public void Dispose()
         {
+            if (_disposed)
+                return;
+            _disposed = true;
             _transform.Dispose();
         }
     }

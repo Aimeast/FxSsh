@@ -59,7 +59,7 @@ FxSsh adheres to the following RFC documents
 - `FxSsh.Tests` &mdash; unit tests
 - `FxSsh.IntegrationTests` &mdash; end-to-end tests driven by a real OpenSSH client
 
-CI runs both suites on Ubuntu and Windows on every push to `dev` and every PR,
+CI runs both suites on Ubuntu and Windows on every push to `dev` or `test` and every PR,
 merges the four coverage files into one combined report, and publishes it on
 the workflow run's summary page (see the **Actions** tab). The full HTML
 report is available as the run's `coverage-report` artifact.
@@ -224,6 +224,12 @@ static async Task TrySendChannelDataAsync(Channel channel, byte[] data)
     catch (ObjectDisposedException)
     {
     }
+    catch (InvalidOperationException ex)
+    {
+        // Backpressure: the send-backlog cap tripped. Stop feeding
+        // this channel instead of retrying into a full backlog.
+        Log.Warn($"Channel {channel.ServerChannelId} backpressure: {ex.Message}");
+    }
     catch (Exception)
     {
         // Channel/session torn down mid-send; nothing left to do.
@@ -255,10 +261,20 @@ static void service_TcpForwardRequest(object sender, TcpRequestArgs e)
         return;
 
     var tcp = new TcpForwardService(e.Host, e.Port, e.OriginatorIP, e.OriginatorPort);
+    // Channel.DataReceived hands a transient view over a pooled receive
+    // buffer: it is only valid inside the synchronous callback. Copy it
+    // (ToArray()) before using it across an await.
     e.Channel.DataReceived += (ss, ee) => tcp.OnData(ee);
+    e.Channel.EofReceived += (ss, ee) => tcp.OnClose();
     e.Channel.CloseReceived += (ss, ee) => tcp.OnClose();
+    e.Channel.ForceClosed += (ss, ee) => tcp.OnClose();
     tcp.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-    tcp.CloseReceived += (ss, ee) => e.Channel.SendClose();
+    // Wait for every accepted byte to be framed before CLOSE, so the
+    // close cannot overtake the target's final response.
+    tcp.CloseReceived += async (ss, ee) =>
+    {
+        try { await e.Channel.SendCloseAsync(); } catch { }
+    };
     tcp.Start();
 }
 
@@ -292,6 +308,8 @@ static void service_SubsystemRequested(object sender, SubsystemRequestedArgs e)
     e.Agreed = true;
     // Default SFTP root is the current user's home directory.
     // To serve read-only, use: new SftpService(readOnly: true);
+    // The built-in path jail is best-effort: pair it with OS-level isolation
+    // when local users can create links inside the root.
     var sftp = new SftpService();
     sftp.Attach(e.Channel);
 }
@@ -313,10 +331,21 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
         var terminal = TerminalFactory.Create(shell, windowWidth, windowHeight, ptyModes);
 
         e.Channel.WindowChange += (ss, ee) => terminal.Resize((int)ee.WidthColumns, (int)ee.HeightRows);
+        // Safe across the await below only because TryTerminalInputAsync
+        // copies the payload first: the DataReceived view is transient.
         e.Channel.DataReceived += async (ss, ee) => await TryTerminalInputAsync(terminal, ee);
         e.Channel.CloseReceived += (ss, ee) => terminal.OnClose();
+        e.Channel.ForceClosed += (ss, ee) => terminal.OnClose();
+        // No EofReceived wiring: an interactive terminal has no
+        // half-close API, and a client EOF must not kill the shell.
         terminal.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-        terminal.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
+        // Queue the close behind every terminal write that is already
+        // in flight; an immediate SendClose could truncate the shell's
+        // last output.
+        terminal.CloseReceived += async (ss, ee) =>
+        {
+            try { await e.Channel.SendCloseAsync(ee); } catch { }
+        };
 
         terminal.Run();
     }
@@ -329,10 +358,21 @@ static void service_CommandOpened(object sender, CommandRequestedArgs e)
 
         var git = new GitService(command, project);
 
+        // git.OnData copies synchronously, before any await - the transient
+        // DataReceived view must not be used past the callback.
         e.Channel.DataReceived += (ss, ee) => git.OnData(ee);
+        // A client half-close (SSH_MSG_CHANNEL_EOF) ends the request
+        // stream: close the child's stdin so git can flush its
+        // response and exit instead of waiting for input forever.
+        e.Channel.EofReceived += (ss, ee) => git.OnClose();
         e.Channel.CloseReceived += (ss, ee) => git.OnClose();
+        e.Channel.ForceClosed += (ss, ee) => git.OnClose();
         git.DataReceived += async (ss, ee) => await TrySendChannelDataAsync(e.Channel, ee);
-        git.CloseReceived += (ss, ee) => e.Channel.SendClose(ee);
+        // Report the exit status only after the child's output is flushed.
+        git.CloseReceived += async (ss, ee) =>
+        {
+            try { await e.Channel.SendCloseAsync(ee); } catch { }
+        };
 
         git.Start();
     }

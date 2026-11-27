@@ -140,6 +140,58 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public async Task Forwarded_channel_burst_is_not_dropped_while_the_tcp_client_reads_slowly()
+        {
+            var factoryCalled = new TaskCompletionSource<bool>();
+            Channel? forwarded = null;
+
+            var service = StartOnFreePort((_, _, _, _) =>
+            {
+                forwarded = new PendingChannel(_connection, 0);
+                factoryCalled.TrySetResult(true);
+                return forwarded;
+            }, out var freePort);
+
+            using var client = await ConnectAsync(freePort);
+            await factoryCalled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            forwarded!.OnConfirmed(1, 2097152, 32768);
+
+            // Give BridgeAsync time to attach the channel handlers.
+            await Task.Delay(300);
+
+            var closed = new TaskCompletionSource<Channel>();
+            service.ForwardedChannelClosed += (_, ch) => closed.TrySetResult(ch);
+
+            var payload = new byte[4 * 1024 * 1024];
+            for (var i = 0; i < payload.Length; i++)
+                payload[i] = (byte)('A' + i % 26);
+
+            // The client does not read yet, so the 16-slot queue and the
+            // socket buffer fill. The old TryWrite path dropped the bridge
+            // here; the queued path only applies backpressure.
+            for (var offset = 0; offset < payload.Length; offset += 32 * 1024)
+                forwarded.OnData(payload.AsMemory(offset, Math.Min(32 * 1024, payload.Length - offset)));
+
+            await Task.Delay(300);
+            Assert.IsFalse(closed.Task.IsCompleted, "a transient full queue must not close the bridge");
+
+            var received = new byte[payload.Length];
+            var total = 0;
+            while (total < received.Length)
+            {
+                var read = await client.ReceiveAsync(received.AsMemory(total), SocketFlags.None)
+                    .AsTask()
+                    .WaitAsync(TimeSpan.FromSeconds(30));
+                if (read == 0)
+                    break;
+                total += read;
+            }
+
+            CollectionAssert.AreEqual(payload, received[..total]);
+            service.Dispose();
+        }
+
+        [TestMethod]
         public async Task Tcp_client_bytes_are_forwarded_into_the_channel()
         {
             var factoryCalled = new TaskCompletionSource<bool>();
@@ -195,13 +247,42 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public async Task Force_closed_channel_tears_down_the_bridged_socket()
+        {
+            var factoryCalled = new TaskCompletionSource<bool>();
+            Channel? forwarded = null;
+
+            var service = StartOnFreePort((_, _, _, _) =>
+            {
+                forwarded = new PendingChannel(_connection, 0);
+                factoryCalled.TrySetResult(true);
+                return forwarded;
+            }, out var freePort);
+
+            using var client = await ConnectAsync(freePort);
+            await factoryCalled.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            forwarded!.OnConfirmed(1, 2097152, 32768);
+            await Task.Delay(300); // let the bridge wire up
+
+            // A rejected open / session teardown force-closes the channel
+            // without a CHANNEL_CLOSE exchange; the local socket must still
+            // be released.
+            forwarded.ForceClose();
+
+            var buffer = new byte[16];
+            var read = await client.ReceiveAsync(buffer, SocketFlags.None).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.AreEqual(0, read);
+            service.Dispose();
+        }
+
+        [TestMethod]
         public async Task Null_factory_drops_the_tcp_connection()
         {
             var factoryCalled = new TaskCompletionSource<bool>();
             var service = StartOnFreePort((_, _, _, _) =>
             {
                 factoryCalled.TrySetResult(true);
-                return null;
+                return null!;
             }, out var port);
 
             using var client = await ConnectAsync(port);
@@ -217,7 +298,7 @@ namespace FxSsh.Tests.Services
         [TestMethod]
         public void Port_zero_binds_an_os_assigned_port()
         {
-            using var service = new PortForwardingService("127.0.0.1", 0, (_, _, _, _) => null);
+            using var service = new PortForwardingService("127.0.0.1", 0, (_, _, _, _) => null!);
             service.Start();
 
             Assert.IsTrue(service.BoundPort > 0);
@@ -227,7 +308,7 @@ namespace FxSsh.Tests.Services
         [TestMethod]
         public async Task Dispose_stops_the_listener()
         {
-            var service = StartOnFreePort((_, _, _, _) => null, out var port);
+            var service = StartOnFreePort((_, _, _, _) => null!, out var port);
 
             service.Dispose();
             service.Dispose(); // idempotent
@@ -240,7 +321,7 @@ namespace FxSsh.Tests.Services
         public void Constructor_rejects_out_of_range_port()
         {
             Assert.ThrowsExactly<ArgumentOutOfRangeException>(
-                () => new PortForwardingService("127.0.0.1", (uint)ushort.MaxValue + 1, (_, _, _, _) => null));
+                () => new PortForwardingService("127.0.0.1", (uint)ushort.MaxValue + 1, (_, _, _, _) => null!));
         }
     }
 }

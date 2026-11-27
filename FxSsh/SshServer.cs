@@ -23,11 +23,14 @@ namespace FxSsh
     {
         private readonly ConcurrentDictionary<long, Session> _sessions = [];
         private readonly Dictionary<string, string> _hostKey = [];
+        private readonly object _hostKeyLocker = new();
+        private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
 
         private int _isDisposed;
         private int _started;
 
-        private TcpListener _listenser = null;
+        private TcpListener _listener;
+        private Task _acceptTask;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="SshServer"/> class with
@@ -81,6 +84,13 @@ namespace FxSsh
         public TimeSpan? InactivityTimeout { get; set; }
 
         /// <summary>
+        /// Gets or sets the limits applied to sessions accepted after the
+        /// assignment. Existing sessions keep the snapshot they were created
+        /// with. Assigning null is rejected when the next session is created.
+        /// </summary>
+        public SessionLimits Limits { get; set; } = new();
+
+        /// <summary>
         /// Occurs when a client connection has been accepted and a
         /// <see cref="Session"/> created for it, before the SSH handshake
         /// starts. Handlers can configure the session or subscribe to its
@@ -89,10 +99,10 @@ namespace FxSsh
         public event EventHandler<Session> ConnectionAccepted;
 
         /// <summary>
-        /// Occurs when a session's protocol loop terminates with an
-        /// exception. This includes normal connection loss
-        /// (<see cref="DisconnectReason.ConnectionLost"/>, e.g. the client
-        /// closed the TCP connection), not only protocol errors.
+        /// Occurs when a session ends with an unexpected or protocol-level
+        /// error. A normal peer close or TCP connection loss
+        /// (<see cref="DisconnectReason.ConnectionLost"/>) is handled as a
+        /// normal session end and does not raise this event.
         /// </summary>
         public event EventHandler<Exception> ExceptionRaised;
 
@@ -124,25 +134,90 @@ namespace FxSsh
         /// <returns>A task that completes once the listener is running.</returns>
         /// <exception cref="InvalidOperationException">The server is already started.</exception>
         /// <exception cref="ObjectDisposedException">The server has been disposed.</exception>
-        public Task StartAsync(CancellationToken cancellationToken = default)
+        public async Task StartAsync(CancellationToken cancellationToken = default)
         {
             CheckDisposed();
-            if (Interlocked.CompareExchange(ref _started, 1, 0) != 0)
-                throw new InvalidOperationException("The server is already started.");
+            await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                CheckDisposed();
+                if (Volatile.Read(ref _started) == 1)
+                    throw new InvalidOperationException("The server is already started.");
 
-            Algorithms.BuildSelection(LogCipherSuites);
+                // Build the immutable algorithm snapshot BEFORE binding: a
+                // failure here must leave the server in a restartable state.
+                Algorithms.BuildSelection(LogCipherSuites);
 
-            Log.Info($"SSH server listening on {StartingInfo.LocalAddress}:{StartingInfo.Port}.");
-            _listenser = StartingInfo.LocalAddress == IPAddress.IPv6Any
-                ? TcpListener.Create(StartingInfo.Port) // dual stack
-                : new TcpListener(StartingInfo.LocalAddress, StartingInfo.Port);
-            _listenser.ExclusiveAddressUse = false;
-            _listenser.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            _listenser.Start();
+                // Fail fast on unusable host key configuration instead of
+                // accepting connections that can never complete a handshake.
+                ValidateHostKeys();
 
-            _ = AcceptConnectionsAsync(cancellationToken);
+                var listener = StartingInfo.LocalAddress == IPAddress.IPv6Any
+                    ? TcpListener.Create(StartingInfo.Port) // dual stack
+                    : new TcpListener(StartingInfo.LocalAddress, StartingInfo.Port);
+                try
+                {
+                    listener.ExclusiveAddressUse = false;
+                    listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+                    listener.Start();
+                }
+                catch
+                {
+                    try { listener.Stop(); } catch { }
+                    throw;
+                }
 
-            return Task.CompletedTask;
+                Log.Info($"SSH server listening on {StartingInfo.LocalAddress}:{StartingInfo.Port}.");
+                _listener = listener;
+                Volatile.Write(ref _started, 1);
+                _acceptTask = AcceptConnectionsAsync(cancellationToken);
+            }
+            finally
+            {
+                _lifecycleGate.Release();
+            }
+        }
+
+        /// <summary>
+        /// Validates the registered host keys before the listener starts:
+        /// every key must parse, and at least one must use an algorithm the
+        /// frozen catalog offers. A misconfigured key would otherwise only
+        /// surface as a failed handshake on every accepted connection.
+        /// </summary>
+        private void ValidateHostKeys()
+        {
+            Dictionary<string, string> snapshot;
+            lock (_hostKeyLocker)
+                snapshot = new Dictionary<string, string>(_hostKey);
+
+            if (snapshot.Count == 0)
+                throw new InvalidOperationException("At least one host key must be registered with AddHostKey before the server is started.");
+
+            var usable = 0;
+            foreach (var key in snapshot)
+            {
+                if (!Algorithms.HostKeySelection.ContainsKey(key.Key))
+                {
+                    Log.Warn($"Host key '{key.Key}' is not offered by the algorithm catalog and will be ignored.");
+                    continue;
+                }
+
+                try
+                {
+                    var keyAlgorithm = Algorithms.HostKeySelection[key.Key](key.Value);
+                    keyAlgorithm.Dispose();
+                    usable++;
+                }
+                catch (Exception ex)
+                {
+                    throw new InvalidOperationException(
+                        string.Format("Host key '{0}' could not be loaded: {1}", key.Key, ex.Message), ex);
+                }
+            }
+
+            if (usable == 0)
+                throw new InvalidOperationException(
+                    "None of the registered host keys uses an algorithm enabled by the algorithm catalog.");
         }
 
         private void LogCipherSuites(AlgorithmCatalog catalog)
@@ -197,10 +272,39 @@ namespace FxSsh
         public async Task StopAsync()
         {
             CheckDisposed();
+            await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                CheckDisposed();
+                await StopCoreAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _lifecycleGate.Release();
+            }
+        }
+
+        /// <summary>
+        /// Actual stop sequence; the caller holds <see cref="_lifecycleGate"/>.
+        /// </summary>
+        private async Task StopCoreAsync()
+        {
             if (Interlocked.Exchange(ref _started, 0) == 0)
                 return;
 
-            _listenser.Stop();
+            var listener = _listener;
+            var acceptTask = _acceptTask;
+            _listener = null;
+            _acceptTask = null;
+
+            try { listener?.Stop(); } catch { }
+
+            // Wait for the accept loop to observe the stopped listener before
+            // tearing down sessions, so no new connection slips in between.
+            if (acceptTask != null)
+            {
+                try { await acceptTask.ConfigureAwait(false); } catch { }
+            }
 
             Log.Info("SSH server stopped.");
 
@@ -211,7 +315,7 @@ namespace FxSsh
                 .Select(session => session.DisconnectAsync())
                 .ToArray();
 
-            await Task.WhenAll(disconnectTasks);
+            await Task.WhenAll(disconnectTasks).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -229,34 +333,79 @@ namespace FxSsh
             ArgumentNullException.ThrowIfNull(type);
             ArgumentNullException.ThrowIfNull(xml);
 
-            if (!_hostKey.ContainsKey(type))
-                _hostKey.Add(type, xml);
+            // Sessions snapshot this dictionary in their constructor on other
+            // threads; guard the duplicate check and add.
+            lock (_hostKeyLocker)
+            {
+                if (!_hostKey.ContainsKey(type))
+                    _hostKey.Add(type, xml);
+            }
         }
 
         /// <summary>
         /// Accept loop: awaits AcceptSocketAsync (never blocks a thread) and
         /// dispatches each inbound connection to HandleConnectionAsync, which
-        /// runs the session's async pumps. The accept task is fire-and-forget
-        /// from StartAsync; it exits when the listener is stopped.
+        /// runs the session's async pumps. The accept task is stored by
+        /// StartAsync and awaited by StopAsync; it exits when the listener is
+        /// stopped or cancellation is requested.
         /// </summary>
         private async Task AcceptConnectionsAsync(CancellationToken cancellationToken)
         {
-            while (Volatile.Read(ref _started) == 1)
+            while (Volatile.Read(ref _started) == 1 && !cancellationToken.IsCancellationRequested)
             {
+                var listener = _listener;
+                if (listener == null)
+                    break;
+
+                Socket socket;
                 try
                 {
-                    var socket = await _listenser.AcceptSocketAsync(cancellationToken);
-                    _ = HandleConnectionAsync(socket, cancellationToken);
+                    socket = await listener.AcceptSocketAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
                 }
                 catch (ObjectDisposedException)
                 {
                     break;
                 }
+                catch (SocketException ex)
+                {
+                    // A listener that was stopped mid-accept is expected;
+                    // anything else is transient and must not spin hot.
+                    if (Volatile.Read(ref _started) == 0 || cancellationToken.IsCancellationRequested)
+                        break;
+
+                    Log.Fail("Listener accept failed.", ex);
+                    try
+                    {
+                        await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    continue;
+                }
                 catch (Exception ex)
                 {
-                    if (Volatile.Read(ref _started) == 1)
-                        Log.Fail("Listener accept failed.", ex);
+                    Log.Fail("Listener accept failed.", ex);
+                    try
+                    {
+                        await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        break;
+                    }
+                    continue;
                 }
+
+                if (socket == null)
+                    continue;
+
+                _ = HandleConnectionAsync(socket, cancellationToken);
             }
         }
 
@@ -266,33 +415,40 @@ namespace FxSsh
         /// created per connection - the session's FillPipeAsync /
         /// ProcessPipeAsync / send pump all run as async tasks on the thread
         /// pool, parking on sockets, pipes, and channels instead of blocking.
+        /// A failure before or during session creation disposes the accepted
+        /// socket instead of leaking it.
         /// </summary>
         private async Task HandleConnectionAsync(Socket socket, CancellationToken cancellationToken)
         {
-            if (Volatile.Read(ref _started) == 0)
-            {
-                socket.Dispose();
-                return;
-            }
-
             var remote = socket.RemoteEndPoint?.ToString() ?? "?";
-            var session = new Session(socket, _hostKey, StartingInfo.ServerBanner, Algorithms);
-
-            session.Disconnected += (ss, ee) => _sessions.TryRemove(session.Id, out _);
-
-            _sessions.TryAdd(session.Id, session);
-
-            // Applied before ConnectionAccepted so a handler can still
-            // override the server-wide default for this session.
-            if (InactivityTimeout is { } inactivityTimeout)
-                session.ConfigureInactivityTimeout(inactivityTimeout);
-
+            Session session = null;
             try
             {
+                if (Volatile.Read(ref _started) == 0)
+                    return;
+
+                Dictionary<string, string> hostKeySnapshot;
+                lock (_hostKeyLocker)
+                    hostKeySnapshot = new Dictionary<string, string>(_hostKey);
+
+                if (Limits == null)
+                    throw new InvalidOperationException("SshServer.Limits must not be null.");
+
+                session = new Session(socket, hostKeySnapshot, StartingInfo.ServerBanner, Algorithms, Limits);
+
+                session.Disconnected += (ss, ee) => _sessions.TryRemove(session.Id, out _);
+
+                _sessions.TryAdd(session.Id, session);
+
+                // Applied before ConnectionAccepted so a handler can still
+                // override the server-wide default for this session.
+                if (InactivityTimeout is { } inactivityTimeout)
+                    session.ConfigureInactivityTimeout(inactivityTimeout);
+
                 Log.Info($"Session accepted from {remote}.");
                 ConnectionAccepted?.Invoke(this, session);
                 Log.Debug($"Session {remote} establishing protocol...");
-                await session.StartAsync(cancellationToken);
+                await session.StartAsync(cancellationToken).ConfigureAwait(false);
             }
             catch (SshConnectionException ex)
             {
@@ -307,14 +463,42 @@ namespace FxSsh
                     Log.Warn($"Session {remote} aborted: {ex.Message}");
                 }
 
-                await session.DisconnectAsync(ex.DisconnectReason, ex.Message);
-                ExceptionRaised?.Invoke(this, ex);
+                if (session != null)
+                    await session.DisconnectAsync(ex.DisconnectReason, ex.Message).ConfigureAwait(false);
+                RaiseException(ex);
             }
             catch (Exception ex)
             {
                 Log.Fail($"Session {remote} failed.", ex);
-                await session.DisconnectAsync();
+                if (session != null)
+                    await session.DisconnectAsync().ConfigureAwait(false);
+                RaiseException(ex);
+            }
+            finally
+            {
+                if (session != null)
+                {
+                    _sessions.TryRemove(session.Id, out _);
+                    // Guarantees the socket, timers and event are cleaned up
+                    // even if StartAsync failed before running its pumps.
+                    await session.DisconnectAsync(DisconnectReason.ConnectionLost, "Session handler completed.").ConfigureAwait(false);
+                }
+                else
+                {
+                    try { socket.Dispose(); } catch { }
+                }
+            }
+        }
+
+        private void RaiseException(Exception ex)
+        {
+            try
+            {
                 ExceptionRaised?.Invoke(this, ex);
+            }
+            catch (Exception handlerError)
+            {
+                Log.Fail("ExceptionRaised handler threw.", handlerError);
             }
         }
 
@@ -334,11 +518,24 @@ namespace FxSsh
         /// </summary>
         public async ValueTask DisposeAsync()
         {
-            if (Volatile.Read(ref _isDisposed) == 1)
-                return;
-            await StopAsync();
-            if (Interlocked.CompareExchange(ref _isDisposed, 1, 0) == 0)
-                GC.SuppressFinalize(this);
+            await _lifecycleGate.WaitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                if (Volatile.Read(ref _isDisposed) == 1)
+                    return;
+
+                // Mark disposed before stopping: StartAsync checks the flag
+                // again after acquiring the gate, so no restart can slip in
+                // between the stop and the flag flip.
+                Volatile.Write(ref _isDisposed, 1);
+                await StopCoreAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                _lifecycleGate.Release();
+            }
+
+            GC.SuppressFinalize(this);
         }
 
         /// <summary>
@@ -349,11 +546,7 @@ namespace FxSsh
         /// </summary>
         public void Dispose()
         {
-            if (Volatile.Read(ref _isDisposed) == 1)
-                return;
-            Stop();
-            if (Interlocked.CompareExchange(ref _isDisposed, 1, 0) == 0)
-                GC.SuppressFinalize(this);
+            DisposeAsync().AsTask().GetAwaiter().GetResult();
         }
         #endregion
     }

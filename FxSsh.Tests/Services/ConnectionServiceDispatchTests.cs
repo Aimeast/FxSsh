@@ -48,10 +48,11 @@ namespace FxSsh.Tests.Services
             _serverSocket.Dispose();
         }
 
-        private static ChannelRequestMessage LoadChannelRequest(string requestType, bool wantReply, Action<SshDataWriter>? fields = null)
+        private static ChannelRequestMessage LoadChannelRequest(string requestType, bool wantReply,
+            Action<SshDataWriter>? fields = null, uint recipientChannel = 0)
         {
             var writer = TestMessages.Payload(ChannelRequestMessage.MessageNumber)
-                .Write(0u)
+                .Write(recipientChannel)
                 .Write(requestType, Encoding.ASCII)
                 .Write(wantReply);
             fields?.Invoke(writer);
@@ -238,6 +239,40 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public async Task Subsystem_request_also_raises_CommandOpened_for_backward_compatibility()
+        {
+            // Hosts from before SubsystemRequested decide subsystem requests
+            // in CommandOpened (ShellType "subsystem"); the dedicated event's
+            // Agreed flag wins when it has a handler. Both must fire so old
+            // hosts keep working.
+            var opened = new TaskCompletionSource<CommandRequestedArgs>();
+            _connection.CommandOpened += (_, e) =>
+            {
+                e.Agreed = true; // legacy decision, overridden below when handled
+                opened.TrySetResult(e);
+            };
+
+            var subsystem = new TaskCompletionSource<SubsystemRequestedArgs>();
+            _connection.SubsystemRequested += (_, e) =>
+            {
+                subsystem.TrySetResult(e); // leaves Agreed unset: rejects
+            };
+
+            _connection.HandleMessageCore(OpenSessionMessage());
+            _connection.HandleMessageCore(Request<SubsystemRequestMessage>("subsystem", wantReply: false,
+                w => w.Write("sftp", Encoding.ASCII)));
+
+            var legacy = await NextAsync(opened, "CommandOpened(subsystem)");
+            Assert.AreEqual("subsystem", legacy.ShellType);
+            Assert.AreEqual("sftp", legacy.CommandText);
+            Assert.IsNotNull(legacy.Channel);
+
+            var dedicated = await NextAsync(subsystem, "SubsystemRequested");
+            Assert.AreEqual("sftp", dedicated.Name);
+            Assert.AreSame(legacy.Channel, dedicated.Channel);
+        }
+
+        [TestMethod]
         public async Task Putty_workarounds_and_channel_keepalive_are_handled()
         {
             var opened = new TaskCompletionSource<CommandRequestedArgs>();
@@ -287,6 +322,29 @@ namespace FxSsh.Tests.Services
             channel.EofReceived += (_, _) => later.TrySetResult(true);
             _connection.HandleMessageCore(new ChannelEofMessage { RecipientChannel = 0 });
             await NextAsync(later, "EofReceived after unknown request");
+        }
+
+        [TestMethod]
+        public async Task Request_for_unknown_channel_is_ignored_without_disconnect()
+        {
+            // A request racing a channel close must not be a transport-level
+            // error. Recipient 999 never exists.
+            _connection.HandleMessageCore(LoadChannelRequest("env", wantReply: true,
+                w => w.Write("NAME", Encoding.ASCII).Write("VALUE", Encoding.ASCII),
+                recipientChannel: 999));
+
+            var opened = new TaskCompletionSource<CommandRequestedArgs>();
+            _connection.CommandOpened += (_, e) =>
+            {
+                e.Agreed = true;
+                opened.TrySetResult(e);
+            };
+            _connection.HandleMessageCore(OpenSessionMessage());
+            _connection.HandleMessageCore(Request<CommandRequestMessage>("exec", wantReply: false,
+                w => w.Write("x", Encoding.ASCII)));
+
+            var args = await NextAsync(opened, "CommandOpened after unknown-channel request");
+            Assert.IsNotNull(args.Channel);
         }
 
         [TestMethod]

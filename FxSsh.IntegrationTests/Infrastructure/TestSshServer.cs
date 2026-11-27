@@ -174,7 +174,7 @@ namespace FxSsh.IntegrationTests.Infrastructure
                 args.Channel.DataReceived += async (_, data) => await TryTerminalInputAsync(terminal, data);
                 args.Channel.CloseReceived += (_, _) => terminal.OnClose();
                 terminal.DataReceived += async (_, data) => await TrySendChannelDataAsync(args.Channel, data);
-                terminal.CloseReceived += (_, exitCode) => args.Channel.SendClose(exitCode);
+                terminal.CloseReceived += (_, exitCode) => _ = CloseChannelAsync(args.Channel, exitCode);
                 terminal.Run();
             }
             else if (args.ShellType == "exec")
@@ -214,22 +214,66 @@ namespace FxSsh.IntegrationTests.Infrastructure
                 using var process = Process.Start(psi);
                 if (process == null)
                 {
-                    channel.SendClose(127);
+                    await CloseChannelAsync(channel, 127).ConfigureAwait(false);
                     return;
                 }
 
+                // Forward channel input to the child's stdin instead of
+                // closing it up front, so commands such as cat exercise the
+                // full bidirectional path. EOF/close from the peer ends the
+                // child's stdin; the process is killed if the channel is torn
+                // down while it is still running.
+                var stdinLock = new object();
+                var stdinClosed = false;
+
+                void CloseStdin()
+                {
+                    lock (stdinLock)
+                    {
+                        if (stdinClosed)
+                            return;
+                        stdinClosed = true;
+                    }
+
+                    try { process.StandardInput.Close(); } catch { }
+                }
+
+                channel.DataReceived += async (_, data) =>
+                {
+                    lock (stdinLock)
+                    {
+                        if (stdinClosed)
+                            return;
+                    }
+
+                    try
+                    {
+                        await process.StandardInput.BaseStream.WriteAsync(data).ConfigureAwait(false);
+                        await process.StandardInput.BaseStream.FlushAsync().ConfigureAwait(false);
+                    }
+                    catch
+                    {
+                        // Process exited or the channel was torn down.
+                    }
+                };
+                channel.EofReceived += (_, _) => CloseStdin();
+                channel.CloseReceived += (_, _) =>
+                {
+                    CloseStdin();
+                    try { process.Kill(entireProcessTree: true); } catch { }
+                };
+
                 var pumpOut = PumpStreamAsync(process.StandardOutput.BaseStream, channel);
                 var pumpErr = PumpStreamAsync(process.StandardError.BaseStream, channel);
-                process.StandardInput.Close();
 
                 await process.WaitForExitAsync();
                 await Task.WhenAll(pumpOut, pumpErr);
 
-                channel.SendClose((uint)process.ExitCode);
+                await CloseChannelAsync(channel, (uint)process.ExitCode).ConfigureAwait(false);
             }
             catch
             {
-                try { channel.SendClose(1); } catch { }
+                await CloseChannelAsync(channel, 1).ConfigureAwait(false);
             }
         }
 
@@ -267,10 +311,19 @@ namespace FxSsh.IntegrationTests.Infrastructure
             // in tests, so both bridge to the requested host:port.
             var forward = new TcpForwardService(args.Host, (int)args.Port, args.OriginatorIP, (int)args.OriginatorPort);
             args.Channel.DataReceived += (_, data) => forward.OnData(data);
+            // Propagate a peer half-close to the local socket; otherwise the
+            // target never sees EOF and the client waits forever for the tail
+            // of the stream.
+            args.Channel.EofReceived += (_, _) => forward.OnClose();
             args.Channel.CloseReceived += (_, _) => forward.OnClose();
             forward.DataReceived += async (_, data) => await TrySendChannelDataAsync(args.Channel, data);
-            forward.CloseReceived += (_, _) => args.Channel.SendClose();
+            forward.CloseReceived += (_, _) => _ = CloseChannelAsync(args.Channel, null);
             forward.Start();
+        }
+
+        private static async Task CloseChannelAsync(Channel channel, uint? exitCode)
+        {
+            try { await channel.SendCloseAsync(exitCode).ConfigureAwait(false); } catch { }
         }
 
         private static async Task TrySendChannelDataAsync(Channel channel, byte[] data)

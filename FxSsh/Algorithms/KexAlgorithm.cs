@@ -8,13 +8,14 @@ namespace FxSsh.Algorithms
     /// the server's key-exchange data and the shared secret K combined with the
     /// exchange hash H to derive session keys (RFC 4253 section 7.2).
     /// </summary>
-    public abstract class KexAlgorithm
+    public abstract class KexAlgorithm : IDisposable
     {
         /// <summary>
         /// The hash algorithm used to compute the exchange hash H and to derive
         /// the session keys (RFC 4253 section 7.2).
         /// </summary>
         protected HashAlgorithm _hashAlgorithm;
+        private bool _disposed;
 
         /// <summary>
         /// When overridden in a derived class, creates the server's key-exchange
@@ -46,9 +47,35 @@ namespace FxSsh.Algorithms
         /// <returns>The computed hash.</returns>
         public byte[] ComputeHash(byte[] input)
         {
+            ObjectDisposedException.ThrowIf(_disposed, this);
             ArgumentNullException.ThrowIfNull(input);
 
             return _hashAlgorithm.ComputeHash(input);
+        }
+
+        /// <summary>
+        /// Releases the ephemeral key-exchange resources: the hash instance
+        /// and any asymmetric key pair held by the derived class. Session
+        /// disposes the algorithm after the exchange hash and key derivation
+        /// have consumed it.
+        /// </summary>
+        public void Dispose()
+        {
+            if (_disposed)
+                return;
+            _disposed = true;
+            Dispose(true);
+            GC.SuppressFinalize(this);
+        }
+
+        /// <summary>
+        /// Releases the resources held by the derived key-exchange method.
+        /// </summary>
+        /// <param name="disposing">True when called from <see cref="Dispose()"/>.</param>
+        protected virtual void Dispose(bool disposing)
+        {
+            if (disposing)
+                _hashAlgorithm?.Dispose();
         }
     }
 }

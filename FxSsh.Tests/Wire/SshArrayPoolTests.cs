@@ -24,6 +24,7 @@ namespace FxSsh.Tests.Wire
             Assert.AreEqual(16, pool.Rent(16).Length);
             Assert.AreEqual(32, pool.Rent(17).Length);
             Assert.AreEqual(64 * 1024, pool.Rent(64 * 1024).Length);
+            Assert.AreEqual(128 * 1024, pool.Rent(128 * 1024).Length);
         }
 
         [TestMethod]
@@ -31,9 +32,9 @@ namespace FxSsh.Tests.Wire
         {
             var pool = CreatePool();
 
-            var buffer = pool.Rent(64 * 1024 + 1);
+            var buffer = pool.Rent(128 * 1024 + 1);
 
-            Assert.AreEqual(64 * 1024 + 1, buffer.Length);
+            Assert.AreEqual(128 * 1024 + 1, buffer.Length);
         }
 
         [TestMethod]
@@ -74,7 +75,7 @@ namespace FxSsh.Tests.Wire
             // pool must silently drop it instead of corrupting a bucket.
             pool.Return(new byte[17]);
             pool.Return(new byte[8]);
-            pool.Return(new byte[128 * 1024]);
+            pool.Return(new byte[256 * 1024]);
 
             var next = pool.Rent(16);
             Assert.AreNotSame(legitimate, next);

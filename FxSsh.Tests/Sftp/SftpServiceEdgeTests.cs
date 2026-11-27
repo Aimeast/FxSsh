@@ -97,6 +97,29 @@ namespace FxSsh.Tests.Sftp
         }
 
         [TestMethod]
+        public void Stat_backend_failure_maps_to_permission_denied()
+        {
+            using var service = new SftpService(new FaultyFileSystem(new UnauthorizedAccessException("denied")));
+            var received = new System.Collections.Generic.List<byte[]>();
+            service.DataReceived += (_, packet) => received.Add(packet);
+
+            service.OnData(Frame(w =>
+            {
+                w.Write(SSH_FXP_STAT);
+                w.Write(1u);
+                w.Write("/file.txt", Encoding.UTF8);
+            }));
+
+            var reader = new SshDataReader(received[^1]);
+            reader.ReadUInt32();
+            var payload = reader.ReadBytes((int)(received[^1].Length - 4));
+            var response = new SshDataReader(payload);
+            Assert.AreEqual(SSH_FXP_STATUS, response.ReadByte());
+            Assert.AreEqual(1u, response.ReadUInt32());
+            Assert.AreEqual(SSH_FX_PERMISSION_DENIED, response.ReadUInt32());
+        }
+
+        [TestMethod]
         public void Open_without_trailing_realpath_still_works()
         {
             using var service = new SftpService(_home);
@@ -120,10 +143,13 @@ namespace FxSsh.Tests.Sftp
         private const byte SSH_FXP_VERSION = 2;
         private const byte SSH_FXP_OPEN = 3;
         private const byte SSH_FXP_READ = 5;
+        private const byte SSH_FXP_STAT = 17;
         private const byte SSH_FXP_REALPATH = 16;
+        private const byte SSH_FXP_STATUS = 101;
         private const byte SSH_FXP_NAME = 104;
         private const byte SSH_FXP_HANDLE = 102;
         private const byte SSH_FXP_DATA = 103;
+        private const uint SSH_FX_PERMISSION_DENIED = 3;
 
         private static byte[] Frame(Action<SshDataWriter> writePayload)
         {

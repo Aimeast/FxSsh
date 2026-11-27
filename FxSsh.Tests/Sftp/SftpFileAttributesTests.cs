@@ -110,5 +110,30 @@ namespace FxSsh.Tests.Sftp
             Assert.ThrowsExactly<ArgumentNullException>(
                 () => SftpFileAttributes.Read(null!));
         }
+
+        [TestMethod]
+        public void Read_rejects_an_extended_attribute_count_above_the_limit()
+        {
+            var reader = new SshDataReader(new SshDataWriter()
+                .Write(0x80000000u) // SSH_FILEXFER_ATTR_EXTENDED
+                .Write(257u)
+                .ToByteArray());
+
+            Assert.ThrowsExactly<ArgumentException>(() => SftpFileAttributes.Read(reader));
+        }
+
+        [TestMethod]
+        public void Read_rejects_an_extended_count_larger_than_the_remaining_data()
+        {
+            // A count of 256 fits the absolute cap but one pair needs at
+            // least two length prefixes (8 bytes), so an empty remainder is
+            // still hostile.
+            var reader = new SshDataReader(new SshDataWriter()
+                .Write(0x80000000u)
+                .Write(256u)
+                .ToByteArray());
+
+            Assert.ThrowsExactly<ArgumentException>(() => SftpFileAttributes.Read(reader));
+        }
     }
 }

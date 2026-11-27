@@ -196,6 +196,15 @@ namespace FxSsh.Algorithms
             ArgumentNullException.ThrowIfNull(keyEx);
 
             var pvr = new BigInteger(keyEx, isUnsigned: true, isBigEndian: true);
+
+            // RFC 4253 section 8: the client's e MUST satisfy 1 < e < p-1.
+            // Accepting 0, 1 or p-1 yields a predictable shared secret (0, 1
+            // or 1) - a classic small-subgroup attack.
+            if (pvr <= BigInteger.One || pvr >= _p - BigInteger.One)
+                throw new SshConnectionException(
+                    "Diffie-Hellman client public value is outside the valid range.",
+                    DisconnectReason.ProtocolError);
+
             var z = BigInteger.ModPow(pvr, _x, _p);
             var bytes = z.ToByteArray(isUnsigned: false, isBigEndian: true);
             return bytes;

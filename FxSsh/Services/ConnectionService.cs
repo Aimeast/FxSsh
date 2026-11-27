@@ -30,8 +30,11 @@ namespace FxSsh.Services
         // scalability cost.
         private readonly Dictionary<uint, Channel> _channels = [];
         private readonly UserAuthArgs _auth = null;
-        private readonly System.Threading.Channels.Channel<ConnectionServiceMessage> _messageChannel =
-            System.Threading.Channels.Channel.CreateUnbounded<ConnectionServiceMessage>(new UnboundedChannelOptions { SingleReader = true });
+
+        // Bounded: a peer flooding channel messages must not be able to grow
+        // the server-side queue without limit. When the queue is full the
+        // session is disconnected (the message loop cannot keep up).
+        private readonly System.Threading.Channels.Channel<ConnectionServiceMessage> _messageChannel;
         private readonly CancellationTokenSource _messageCts = new();
 
         private int _serverChannelCounter = -1;
@@ -54,6 +57,12 @@ namespace FxSsh.Services
             ArgumentNullException.ThrowIfNull(auth);
 
             _auth = auth;
+            _messageChannel = System.Threading.Channels.Channel.CreateBounded<ConnectionServiceMessage>(
+                new BoundedChannelOptions(session.Limits.MaximumQueuedChannelMessages)
+                {
+                    SingleReader = true,
+                    SingleWriter = true,
+                });
 
             Task.Run(MessageLoopAsync);
         }
@@ -107,11 +116,19 @@ namespace FxSsh.Services
             _messageCts.Cancel();
             _messageChannel.Writer.TryComplete();
 
+            // Release pooled channel-data buffers still sitting in the queue
+            // (the message loop may already have exited on cancellation).
+            while (_messageChannel.Reader.TryRead(out var pending))
+                (pending as ChannelDataMessage)?.DataLease?.ReleaseIfNotRetained();
+
             lock (_locker)
             {
                 foreach (var channel in _channels.Values.ToArray())
                 {
-                    channel.ForceClose();
+                    // One failing channel teardown must not abort the close of
+                    // the remaining channels or the reverse-forward listeners.
+                    try { channel.ForceClose(); }
+                    catch (Exception ex) { Log.Warn($"Force-closing a channel during session teardown failed: {ex.Message}"); }
                 }
 
                 // Tear down all reverse-forward listeners; their TCP sockets
@@ -136,14 +153,31 @@ namespace FxSsh.Services
             {
                 // The queued message's RawBytes is a zero-copy slice over the
                 // SSH receive buffer, which is recycled by the next
-                // ReceiveMessage. The queue is drained asynchronously, so
-                // snapshot the wire bytes now - otherwise LoadFrom<T> would
-                // re-parse garbage (e.g. a subsystem request whose type byte
-                // became the next message's type).
-                message.SnapshotRawBytes();
+                // ReceiveMessage. The queue is drained asynchronously, so any
+                // message that will be re-parsed with LoadFrom<T> must keep an
+                // independent copy. Only ChannelOpenMessage and
+                // ChannelRequestMessage are re-parsed later (into a concrete
+                // subtype); every other message materialises its fields in
+                // OnLoad before it is queued and never touches RawBytes again.
+                if (message is ChannelOpenMessage || message is ChannelRequestMessage)
+                    message.SnapshotRawBytes();
+
+                // Channel data is copied once into a pooled lease: the public
+                // DataReceived callback sees a transient view, and the
+                // in-library forwarding/SFTP consumers can take ownership
+                // instead of copying again. The message loop releases the
+                // lease after dispatch when nobody retained it.
                 if (message is ChannelDataMessage data)
-                    data.Data = data.Data.ToArray();
-                _messageChannel.Writer.TryWrite(message);
+                {
+                    data.DataLease = ChannelDataLease.CopyFrom(data.Data);
+                    data.Data = data.DataLease.Memory;
+                }
+                if (!_messageChannel.Writer.TryWrite(message))
+                {
+                    (message as ChannelDataMessage)?.DataLease?.ReleaseIfNotRetained();
+                    Log.Fail("Connection service message queue is full; disconnecting.");
+                    _session.Disconnect(DisconnectReason.ByApplication, "Too many queued channel messages.");
+                }
             }
         }
 
@@ -153,15 +187,29 @@ namespace FxSsh.Services
             {
                 await foreach (var message in _messageChannel.Reader.ReadAllAsync(_messageCts.Token))
                 {
+                    var lease = (message as ChannelDataMessage)?.DataLease;
                     try
                     {
                         Dispatch(message);
+                    }
+                    catch (SshConnectionException ex)
+                    {
+                        // A channel-level protocol violation is fatal for the
+                        // connection; log and tear the session down instead of
+                        // silently dropping the message.
+                        Log.Fail($"Connection service protocol error: {ex.Message}");
+                        _session.Disconnect(ex.DisconnectReason, ex.Message);
+                        return;
                     }
                     catch (Exception ex)
                     {
                         // A single malformed/hostile message must not kill the
                         // whole channel-processing loop silently.
                         Log.Fail($"Connection service message handling failed: {ex}");
+                    }
+                    finally
+                    {
+                        lease?.ReleaseIfNotRetained();
                     }
                 }
             }
@@ -221,13 +269,16 @@ namespace FxSsh.Services
                     break;
                 default:
                     Log.Warn($"Unknown channel type: {message.ChannelType}.");
+                    // RFC 4254 section 5.1: refuse the open and keep the
+                    // connection alive; an unknown channel type is not a
+                    // transport-level error.
                     _session.SendMessage(new ChannelOpenFailureMessage
                     {
                         RecipientChannel = message.SenderChannel,
                         ReasonCode = ChannelOpenFailureReason.UnknownChannelType,
                         Description = string.Format("Unknown channel type: {0}.", message.ChannelType),
                     });
-                    throw new SshConnectionException(string.Format("Unknown channel type: {0}.", message.ChannelType));
+                    break;
             }
         }
 
@@ -238,6 +289,8 @@ namespace FxSsh.Services
         private void HandleMessage(ForwardedTcpIpMessage message)
         {
             var channel = HandleChannelOpenMessage(message);
+            if (channel == null)
+                return;
             var args = new TcpRequestArgs(channel,
                 message.Address,
                 (int)message.Port,
@@ -362,10 +415,23 @@ namespace FxSsh.Services
                 if (!_forwarders.TryGetValue((address, port), out fwd))
                 {
                     // Address may have been normalized by the listener (e.g. Any).
-                    // Fall back to a single-match by port alone.
-                    fwd = _forwarders.Values.FirstOrDefault(f => f.BoundPort == port);
-                    if (fwd != null)
-                        _forwarders.Remove((fwd.BoundAddress, fwd.BoundPort));
+                    // Fall back by port alone, but only when exactly one
+                    // listener matches: with several listeners on the same
+                    // port across addresses, guessing would tear down the
+                    // wrong one.
+                    var matches = _forwarders
+                        .Where(kv => kv.Value.BoundPort == port)
+                        .Take(2)
+                        .ToArray();
+                    if (matches.Length == 1)
+                    {
+                        fwd = matches[0].Value;
+                        _forwarders.Remove(matches[0].Key);
+                    }
+                    else
+                    {
+                        fwd = null;
+                    }
                 }
                 else
                 {
@@ -399,10 +465,20 @@ namespace FxSsh.Services
             var serverChannelId = (uint)Interlocked.Increment(ref _serverChannelCounter);
 
             var channel = new PendingForwardedChannel(this, serverChannelId);
+            lock (_locker)
+            {
+                if (_channels.Count >= _session.Limits.MaximumChannels)
+                {
+                    Log.Warn($"Refusing forwarded channel: {_session.Limits.MaximumChannels} channels already open.");
+                    // The caller closes the accepted TCP socket when the
+                    // factory returns null.
+                    return null;
+                }
+                _channels[serverChannelId] = channel;
+            }
+
             if (Log.IsEnabled(LogLevel.Trace))
                 Log.Trace($"Forwarded channel {serverChannelId} opened to peer, awaiting confirmation.");
-            lock (_locker)
-                _channels[serverChannelId] = channel;
 
             var open = new ForwardedTcpIpOpenMessage(
                 serverChannelId,
@@ -432,6 +508,15 @@ namespace FxSsh.Services
 
             if (channel is PendingForwardedChannel pending)
             {
+                if (message.MaximumPacketSize == 0)
+                {
+                    Log.Warn($"Peer confirmed forwarded channel {message.RecipientChannel} with a zero maximum packet size; closing it.");
+                    lock (_locker)
+                        _channels.Remove(pending.ServerChannelId);
+                    pending.ForceClose();
+                    return;
+                }
+
                 pending.OnConfirmed(message.SenderChannel,
                     message.InitialWindowSize, message.MaximumPacketSize);
                 return;
@@ -485,6 +570,8 @@ namespace FxSsh.Services
         {
             Log.Info($"Direct TCP forward requested: {message.Host}:{message.Port}.");
             var channel = HandleChannelOpenMessage(message);
+            if (channel == null)
+                return;
             var args = new TcpRequestArgs(channel,
                 message.Host,
                 (int)message.Port,
@@ -524,16 +611,16 @@ namespace FxSsh.Services
                     break;
                 case "simple@putty.projects.tartarus.org":
                     //https://tartarus.org/~simon/putty-snapshots/htmldoc/AppendixF.html
-                    if (message.WantReply)
+                    if (message.WantReply
+                        && TryFindChannelByServerId<SessionChannel>(message.RecipientChannel, out var simpleChannel))
                     {
-                        var c = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
-                        _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = c.ClientChannelId });
+                        _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = simpleChannel.ClientChannelId });
                     }
                     break;
                 case "winadj@putty.projects.tartarus.org":
                     //https://tartarus.org/~simon/putty-snapshots/htmldoc/AppendixF.html
-                    var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
-                    _session.SendMessage(new ChannelFailureMessage { RecipientChannel = channel.ClientChannelId });
+                    if (TryFindChannelByServerId<SessionChannel>(message.RecipientChannel, out var winAdjChannel))
+                        _session.SendMessage(new ChannelFailureMessage { RecipientChannel = winAdjChannel.ClientChannelId });
                     break;
                 case "auth-agent-req@openssh.com":
                     // https://github.com/openssh/openssh-portable/blob/V_8_0_P1/session.c#L2225
@@ -541,29 +628,37 @@ namespace FxSsh.Services
                 case "keepalive@openssh.com":
                     // OpenSSH liveness probe sent on a specific channel rather
                     // than via SSH_MSG_GLOBAL_REQUEST. No payload; just prove
-                    // we are alive when the peer asks for a reply. Do NOT fall
-                    // through to default - that would throw and tear down the
-                    // session, defeating the probe.
-                    if (message.WantReply)
+                    // we are alive when the peer asks for a reply. A probe
+                    // racing a channel close is ignored instead of being
+                    // treated as a protocol violation.
+                    if (message.WantReply
+                        && TryFindChannelByServerId<Channel>(message.RecipientChannel, out var keepAliveChannel))
                     {
-                        var channelKeepAlive = FindChannelByServerId<Channel>(message.RecipientChannel);
-                        _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channelKeepAlive.ClientChannelId });
+                        _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = keepAliveChannel.ClientChannelId });
                     }
                     break;
                 default:
                     Log.Warn($"Unknown channel request: {message.RequestType}.");
-                    if (message.WantReply)
+                    // Unknown channel requests are advisory; answer FAILURE
+                    // when a reply was requested and keep the connection. A
+                    // request for a channel that just closed is ignored: there
+                    // is no client channel id left to address a reply to.
+                    if (message.WantReply
+                        && TryFindChannelByServerId<Channel>(message.RecipientChannel, out var requestChannel))
+                    {
                         _session.SendMessage(new ChannelFailureMessage
                         {
-                            RecipientChannel = FindChannelByServerId<Channel>(message.RecipientChannel).ClientChannelId
+                            RecipientChannel = requestChannel.ClientChannelId
                         });
-                    throw new SshConnectionException(string.Format("Unknown request type: {0}.", message.RequestType));
+                    }
+                    break;
             }
         }
 
         private void HandleMessage(EnvMessage message)
         {
-            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+            if (!TryFindChannelByServerId<SessionChannel>(message.RecipientChannel, out var channel))
+                return;
 
             EnvReceived?.Invoke(this, new EnvironmentArgs(channel, message.Name, message.Value, _auth));
 
@@ -573,7 +668,8 @@ namespace FxSsh.Services
 
         private void HandleMessage(PtyRequestMessage message)
         {
-            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+            if (!TryFindChannelByServerId<SessionChannel>(message.RecipientChannel, out var channel))
+                return;
 
             PtyReceived?.Invoke(this,
                 new PtyArgs(channel,
@@ -592,27 +688,51 @@ namespace FxSsh.Services
         {
             if (Log.IsEnabled(LogLevel.Trace))
                 Log.Trace($"Channel data: server-id={message.RecipientChannel} bytes={message.Data.Length}");
-            var channel = FindChannelByServerId<Channel>(message.RecipientChannel);
-            channel.OnData(message.Data);
+
+            // RFC 4254 has no error for data on a channel the peer never
+            // opened (it may race a close). Ignore it, as OpenSSH does,
+            // instead of treating it as a transport-level violation.
+            var channel = FindChannelByServerIdOrNull<Channel>(message.RecipientChannel);
+            if (channel == null)
+            {
+                Log.Debug($"Channel data for unknown server channel {message.RecipientChannel}; ignored.");
+                return;
+            }
+            channel.OnData(message.DataLease ?? ChannelDataLease.Wrap(message.Data));
         }
 
         private void HandleMessage(ChannelWindowAdjustMessage message)
         {
             if (Log.IsEnabled(LogLevel.Trace))
                 Log.Trace($"Window adjust: channel={message.RecipientChannel} delta={message.BytesToAdd}");
-            var channel = FindChannelByServerId<Channel>(message.RecipientChannel);
+            var channel = FindChannelByServerIdOrNull<Channel>(message.RecipientChannel);
+            if (channel == null)
+            {
+                Log.Debug($"Window adjust for unknown server channel {message.RecipientChannel}; ignored.");
+                return;
+            }
             channel.ClientAdjustWindow(message.BytesToAdd);
         }
 
         private void HandleMessage(ChannelEofMessage message)
         {
-            var channel = FindChannelByServerId<Channel>(message.RecipientChannel);
+            var channel = FindChannelByServerIdOrNull<Channel>(message.RecipientChannel);
+            if (channel == null)
+            {
+                Log.Debug($"EOF for unknown server channel {message.RecipientChannel}; ignored.");
+                return;
+            }
             channel.OnEof();
         }
 
         private void HandleMessage(ChannelCloseMessage message)
         {
-            var channel = FindChannelByServerId<Channel>(message.RecipientChannel);
+            var channel = FindChannelByServerIdOrNull<Channel>(message.RecipientChannel);
+            if (channel == null)
+            {
+                Log.Debug($"Close for unknown server channel {message.RecipientChannel}; ignored.");
+                return;
+            }
             channel.OnClose();
         }
 
@@ -623,17 +743,43 @@ namespace FxSsh.Services
 
         private SessionChannel HandleChannelOpenMessage(ChannelOpenMessage message)
         {
-            var channel = new SessionChannel(
-                this,
-                message.SenderChannel,
-                message.InitialWindowSize,
-                message.MaximumPacketSize,
-                (uint)Interlocked.Increment(ref _serverChannelCounter));
+            // RFC 4254 section 5.1: a zero maximum packet size cannot carry
+            // any payload; reject it up front instead of stalling all sends.
+            if (message.MaximumPacketSize == 0)
+            {
+                SendOpenFailure(message.SenderChannel, ChannelOpenFailureReason.AdministrativelyProhibited,
+                    "Maximum packet size must be greater than zero.");
+                return null;
+            }
+
+            SessionChannel channel;
+            lock (_locker)
+            {
+                if (_channels.Count >= _session.Limits.MaximumChannels)
+                {
+                    channel = null;
+                }
+                else
+                {
+                    channel = new SessionChannel(
+                        this,
+                        message.SenderChannel,
+                        message.InitialWindowSize,
+                        message.MaximumPacketSize,
+                        (uint)Interlocked.Increment(ref _serverChannelCounter));
+                    _channels[channel.ServerChannelId] = channel;
+                }
+            }
+
+            if (channel == null)
+            {
+                Log.Warn($"Refusing channel open ({message.ChannelType}): {_session.Limits.MaximumChannels} channels already open.");
+                SendOpenFailure(message.SenderChannel, ChannelOpenFailureReason.ResourceShortage,
+                    "Too many open channels.");
+                return null;
+            }
 
             Log.Info($"Channel opened: type={message.ChannelType} client-id={message.SenderChannel} server-id={channel.ServerChannelId}.");
-
-            lock (_locker)
-                _channels[channel.ServerChannelId] = channel;
 
             var msg = new ChannelOpenConfirmationMessage
             {
@@ -647,9 +793,20 @@ namespace FxSsh.Services
             return channel;
         }
 
+        private void SendOpenFailure(uint senderChannel, ChannelOpenFailureReason reason, string description)
+        {
+            _session.SendMessage(new ChannelOpenFailureMessage
+            {
+                RecipientChannel = senderChannel,
+                ReasonCode = reason,
+                Description = description,
+            });
+        }
+
         private void HandleMessage(ShellRequestMessage message)
         {
-            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+            if (!TryFindChannelByServerId<SessionChannel>(message.RecipientChannel, out var channel))
+                return;
 
             Log.Info($"Shell requested on channel {channel.ServerChannelId}.");
             var args = new CommandRequestedArgs(channel, "shell", null, _auth);
@@ -664,7 +821,8 @@ namespace FxSsh.Services
 
         private void HandleMessage(CommandRequestMessage message)
         {
-            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+            if (!TryFindChannelByServerId<SessionChannel>(message.RecipientChannel, out var channel))
+                return;
 
             Log.Info($"Exec requested on channel {channel.ServerChannelId}: \"{message.Command}\".");
             var args = new CommandRequestedArgs(channel, "exec", message.Command, _auth);
@@ -679,11 +837,13 @@ namespace FxSsh.Services
 
         private void HandleMessage(SubsystemRequestMessage message)
         {
-            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+            if (!TryFindChannelByServerId<SessionChannel>(message.RecipientChannel, out var channel))
+                return;
 
             Log.Info($"Subsystem requested on channel {channel.ServerChannelId}: {message.Name}.");
 
-            // Backward-compatible generic event (ShellType == "subsystem").
+            // Backward-compatible generic event (ShellType == "subsystem"):
+            // hosts that predate SubsystemRequested decide here.
             var args = new CommandRequestedArgs(channel, "subsystem", message.Name, _auth);
             CommandOpened?.Invoke(this, args);
 
@@ -706,23 +866,45 @@ namespace FxSsh.Services
 
         private void HandleMessage(WindowChangeMessage message)
         {
-            var channel = FindChannelByServerId<SessionChannel>(message.RecipientChannel);
+            if (!TryFindChannelByServerId<SessionChannel>(message.RecipientChannel, out var channel))
+                return;
 
             channel.OnWindowChange(new WindowChangeArgs(channel, message.WidthColumns, message.HeightRows, message.WidthPixels, message.HeightPixels));
+
+            // window-change normally sets want_reply=false, but RFC 4254
+            // section 6.7 allows a client to request an acknowledgement.
+            if (message.WantReply)
+                _session.SendMessage(new ChannelSuccessMessage { RecipientChannel = channel.ClientChannelId });
         }
 
-        private T FindChannelByServerId<T>(uint id) where T : Channel
+        /// <summary>
+        /// Look up an open channel of the requested type. Returns false for an
+        /// unknown id or a channel of another type: every channel message can
+        /// race a close, so callers drop or answer the message instead of
+        /// treating it as a transport-level violation.
+        /// </summary>
+        private bool TryFindChannelByServerId<T>(uint id, out T channel) where T : Channel
         {
             lock (_locker)
             {
-                var channel = _channels.TryGetValue(id, out var c) ? c as T : null;
-                if (channel == null)
-                    throw new SshConnectionException(string.Format("Invalid server channel id {0}.", id),
-                        DisconnectReason.ProtocolError);
-
-                return channel;
+                if (_channels.TryGetValue(id, out var c) && c is T typed)
+                {
+                    channel = typed;
+                    return true;
+                }
             }
+
+            channel = null;
+            return false;
         }
+
+        /// <summary>
+        /// Look up an open channel, returning null for an unknown id. Used by
+        /// the data/control hot path, where a message racing a channel close
+        /// must be dropped rather than treated as a protocol violation.
+        /// </summary>
+        private T FindChannelByServerIdOrNull<T>(uint id) where T : Channel
+            => TryFindChannelByServerId(id, out T channel) ? channel : null;
 
         internal void RemoveChannel(Channel channel)
         {

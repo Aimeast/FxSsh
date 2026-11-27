@@ -21,9 +21,6 @@ jobs:
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 11.0.x
-          # .NET 11 is still in RC at the time of writing; drop this once the
-          # runners ship the GA SDK.
-          dotnet-quality: preview
 
       - name: Restore
         run: dotnet restore
@@ -45,7 +42,6 @@ jobs:
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 11.0.x
-          dotnet-quality: preview
 
       - name: Build
         run: dotnet build --configuration Release
@@ -84,7 +80,6 @@ jobs:
         uses: actions/setup-dotnet@v6
         with:
           dotnet-version: 11.0.x
-          dotnet-quality: preview
 
       # The system OpenSSH on windows-latest (9.5) predates some algorithms
       # in the library's catalog (mlkem768x25519-sha256 needs 9.9+). Install
@@ -162,8 +157,8 @@ jobs:
           name: integration-results-windows-latest
           path: coverage/integration-windows
 
-      # This job never builds the library, so the 11 preview SDK the other
-      # jobs use is unnecessary; a stable runtime keeps the tools' framework
+      # This job never builds the library, so the 11 SDK the other jobs use
+      # is unnecessary; a stable runtime keeps the tools' framework
       # resolution deterministic.
       - name: Setup .NET
         uses: actions/setup-dotnet@v6

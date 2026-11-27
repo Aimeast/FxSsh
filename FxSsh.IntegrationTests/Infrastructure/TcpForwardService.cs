@@ -26,7 +26,10 @@ namespace FxSsh.IntegrationTests.Infrastructure
         private readonly int _port;
         private readonly Channel<IMemoryOwner<byte>> _sendChannel = Channel.CreateBounded<IMemoryOwner<byte>>(SendChannelOptions);
         private readonly CancellationTokenSource _cts = new();
+        private readonly object _writeLocker = new();
+        private Task _pendingWrites = Task.CompletedTask;
         private bool _closed;
+        private int _closeRaised;
 
         public TcpForwardService(string host, int port, string originatorIP, int originatorPort)
         {
@@ -70,15 +73,34 @@ namespace FxSsh.IntegrationTests.Infrastructure
                     DataReceived?.Invoke(this, bytes.AsSpan(0, read).ToArray());
                 }
 
-                CloseReceived?.Invoke(this, EventArgs.Empty);
-                Finish();
+                RaiseClose();
 
+                // Let the send pump flush every queued byte and close the
+                // local send direction before the socket is torn down. Closing
+                // first truncates the tail of the client->target stream.
                 await sendTask;
+                Finish();
             }
             catch
             {
+                // A failed local connect (or a mid-stream socket error) must
+                // still close the SSH channel, otherwise the forwarded client
+                // waits for a CHANNEL_CLOSE that never arrives.
+                RaiseClose();
                 OnClose();
+                Finish();
             }
+        }
+
+        private void RaiseClose()
+        {
+            if (Interlocked.Exchange(ref _closeRaised, 1) != 0)
+                return;
+
+            // A failing host handler must not skip the OnClose/Finish teardown
+            // that follows this call; otherwise the local socket and the send
+            // pump would outlive the SSH channel.
+            try { CloseReceived?.Invoke(this, EventArgs.Empty); } catch { }
         }
 
         private async Task SendLoopAsync()
@@ -93,7 +115,20 @@ namespace FxSsh.IntegrationTests.Infrastructure
                         {
                             if (data.Memory.Length == 0)
                                 continue;
-                            await _socket.SendAsync(data.Memory, SocketFlags.None, _cts.Token);
+
+                            // SendAsync may accept fewer bytes than requested;
+                            // a partial write must not truncate the stream.
+                            var offset = 0;
+                            while (offset < data.Memory.Length)
+                            {
+                                var sent = await _socket.SendAsync(
+                                    data.Memory[offset..],
+                                    SocketFlags.None,
+                                    _cts.Token);
+                                if (sent <= 0)
+                                    throw new SocketException((int)SocketError.ConnectionReset);
+                                offset += sent;
+                            }
                         }
                         catch
                         {
@@ -110,6 +145,10 @@ namespace FxSsh.IntegrationTests.Infrastructure
             {
                 while (_sendChannel.Reader.TryRead(out var item))
                     item.Dispose();
+
+                // The queue is drained (or the pump was canceled): FIN now,
+                // after the data, never before it.
+                try { _socket.Shutdown(SocketShutdown.Send); } catch { }
             }
         }
 
@@ -117,27 +156,48 @@ namespace FxSsh.IntegrationTests.Infrastructure
         {
             var owned = new PooledMemoryOwner(data.Length);
             data.Span.CopyTo(owned.Memory.Span);
+
+            // Never block the SSH message loop on the local TCP peer: a full
+            // queue combined with a full-duplex window stall would deadlock
+            // (the loop also has to deliver the WINDOW_ADJUST that drains the
+            // outgoing side). Queue asynchronously and let the channel's
+            // bounded writer apply backpressure to this copy. Chaining the
+            // writes preserves stream order and lets OnClose wait for them.
+            lock (_writeLocker)
+            {
+                _pendingWrites = QueueAfterAsync(_pendingWrites, owned);
+            }
+        }
+
+        private async Task QueueAfterAsync(Task previous, IMemoryOwner<byte> owned)
+        {
+            try { await previous.ConfigureAwait(false); } catch { }
+
             try
             {
-                _sendChannel.Writer.WriteAsync(owned, _cts.Token).AsTask().GetAwaiter().GetResult();
+                await _sendChannel.Writer.WriteAsync(owned, _cts.Token).ConfigureAwait(false);
             }
             catch
             {
                 owned.Dispose();
-                OnClose();
             }
         }
 
         public void OnClose()
         {
+            // Complete the writer only after every byte accepted from SSH has
+            // been enqueued; the send pump then drains the queue and FINs.
+            Task pending;
+            lock (_writeLocker)
+                pending = _pendingWrites;
+
+            _ = CompleteAfterAsync(pending);
+        }
+
+        private async Task CompleteAfterAsync(Task pending)
+        {
+            try { await pending.ConfigureAwait(false); } catch { }
             _sendChannel.Writer.TryComplete();
-            try
-            {
-                _socket.Shutdown(SocketShutdown.Send);
-            }
-            catch
-            {
-            }
         }
 
         private void Finish()

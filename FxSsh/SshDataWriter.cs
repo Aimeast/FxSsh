@@ -66,6 +66,50 @@ namespace FxSsh
         }
 
         /// <summary>
+        /// Writable view over the bytes already written, for backfilling
+        /// header fields after the payload is known (e.g. the SSH
+        /// packet_length and padding_length reserved at the start of a frame).
+        /// </summary>
+        internal Span<byte> GetSpan(int offset, int length)
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(SshDataWriter));
+            if ((uint)offset > (uint)_buffer.Length || (uint)length > (uint)(_buffer.Length - offset))
+                throw new ArgumentOutOfRangeException(nameof(length));
+            return _buffer.AsSpan(offset, length);
+        }
+
+        /// <summary>
+        /// The pooled array backing this writer. Valid until the writer is
+        /// disposed or detached; used by the framing hot path for in-place
+        /// cipher transforms, which take <c>byte[]</c> rather than spans.
+        /// </summary>
+        internal byte[] GetBufferArray()
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(SshDataWriter));
+            return _buffer;
+        }
+
+        /// <summary>
+        /// Transfer ownership of the pooled buffer to the caller without
+        /// copying. The writer is marked disposed and will not return the
+        /// buffer, so the caller must eventually return it to
+        /// <see cref="SshBuffers.Packets"/> itself.
+        /// </summary>
+        internal byte[] DetachBuffer()
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(SshDataWriter));
+
+            var buffer = _buffer;
+            _buffer = null!;
+            _disposed = true;
+            GC.SuppressFinalize(this);
+            return buffer;
+        }
+
+        /// <summary>
         /// Compact the writer into a freshly allocated, exactly-sized array
         /// and release the pooled rental. The returned array is the caller's
         /// to keep; the writer is disposed after this call.
@@ -84,6 +128,7 @@ namespace FxSsh
             SshBuffers.Packets.Return(_buffer);
             _disposed = true;
             _buffer = null!;
+            GC.SuppressFinalize(this);
             return result;
         }
 
@@ -108,10 +153,11 @@ namespace FxSsh
             SshBuffers.Packets.Return(_buffer);
             _disposed = true;
             _buffer = null!;
+            GC.SuppressFinalize(this);
             return true;
         }
 
-        private Span<byte> Reserve(int count)
+        internal Span<byte> Reserve(int count)
         {
             if (_disposed)
                 throw new ObjectDisposedException(nameof(SshDataWriter));
@@ -259,7 +305,10 @@ namespace FxSsh
         /// <returns>This writer, to allow call chaining.</returns>
         public SshDataWriter WriteMpint(ReadOnlyMemory<byte> data)
         {
-            if (data.Length == 1 && data.Span[0] == 0)
+            // RFC 4251 section 5: the integer zero is encoded as a
+            // zero-length string, so both an empty array and a single 0x00
+            // byte map to the same wire form.
+            if (data.Length == 0 || (data.Length == 1 && data.Span[0] == 0))
             {
                 Write((uint)0);
             }
@@ -331,13 +380,13 @@ namespace FxSsh
                 SshBuffers.Packets.Return(_buffer);
                 _buffer = null!;
             }
+            GC.SuppressFinalize(this);
         }
 
         // Safety net: if a writer is dropped without Dispose/ToByteArray,
-        // return the rented buffer to the pool rather than letting it leak
-        // until the pool's own bucket eviction. GC.SuppressFinalize is called
-        // in the normal Dispose path below via the bool overload - kept
-        // simple here because this writer is sealed and short-lived.
+        // return the rented buffer to the pool rather than letting it leak.
+        // The normal exit paths suppress finalization, so writers that are
+        // used correctly never reach the finalizer queue.
         /// <summary>
         /// Finalizes an instance of the <see cref="SshDataWriter"/> class.
         /// Acts as a safety net for writers that are garbage-collected

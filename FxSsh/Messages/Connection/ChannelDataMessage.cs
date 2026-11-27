@@ -1,4 +1,5 @@
 ﻿using System;
+using FxSsh.Services;
 
 namespace FxSsh.Messages.Connection
 {
@@ -17,6 +18,13 @@ namespace FxSsh.Messages.Connection
         /// <summary>Gets or sets the application data bytes carried by this message.</summary>
         public ReadOnlyMemory<byte> Data { get; set; }
 
+        /// <summary>
+        /// Pooled ownership of <see cref="Data"/> while the message is queued
+        /// for the connection service. The message loop releases it after
+        /// dispatch unless an internal consumer retained it.
+        /// </summary>
+        internal ChannelDataLease DataLease { get; set; }
+
         /// <summary>Gets the message number that identifies this message as SSH_MSG_CHANNEL_DATA.</summary>
         public override byte MessageType { get { return MessageNumber; } }
 
@@ -26,12 +34,10 @@ namespace FxSsh.Messages.Connection
         {
             RecipientChannel = reader.ReadUInt32();
             // Zero-copy: keep the slice over the decoded packet buffer rather
-            // than ToArray()'ing into a fresh allocation. The packet buffer
-            // is retained by Session.ReceiveMessage until LoadMessage returns,
-            // which is synchronous here, so the slice stays valid for the
-            // downstream OnData -> DataReceived -> consumer pump all of which
-            // run on the same ConnectionService message loop thread before
-            // the next ReceiveMessage reuses the buffer.
+            // than ToArray()'ing into a fresh allocation. ConnectionService
+            // copies it once into a pooled lease before queueing the message,
+            // because its message loop runs after the session's dispatch
+            // buffer has been recycled.
             Data = reader.ReadBinaryAsMemory();
         }
 

@@ -105,5 +105,14 @@ namespace FxSsh.Algorithms
             kCl.CopyTo(concat, kPq.Length);
             return SHA256.HashData(concat);
         }
+
+        /// <summary>Releases the ephemeral X25519 key pair.</summary>
+        /// <param name="disposing">True when called from <see cref="KexAlgorithm.Dispose()"/>.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                _x25519?.Dispose();
+            base.Dispose(disposing);
+        }
     }
 }

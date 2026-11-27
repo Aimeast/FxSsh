@@ -1,5 +1,5 @@
-﻿using System.Collections.Generic;
-using System.Linq;
+﻿using System;
+using System.Collections.Generic;
 using System.Text;
 
 namespace FxSsh.Messages
@@ -15,6 +15,9 @@ namespace FxSsh.Messages
     public class ExtInfoMessage : Message
     {
         internal const byte MessageNumber = 7;
+
+        /// <summary>Upper bound for the extension count accepted from the wire.</summary>
+        private const uint MaximumExtensions = 256;
 
         /// <summary>
         /// Extension name -> value dictionary.
@@ -34,6 +37,13 @@ namespace FxSsh.Messages
         protected override void OnLoad(SshDataReader reader)
         {
             var count = reader.ReadUInt32();
+
+            // A trusted count is still bounded: each pair needs at least two
+            // length prefixes, and allocation must never follow a hostile
+            // uint32 blindly.
+            if (count > MaximumExtensions || count > reader.DataAvailable / 8)
+                throw new System.ArgumentException("Invalid extension count.", nameof(reader));
+
             var dict = new Dictionary<string, string>((int)count);
             for (int i = 0; i < count; i++)
             {
@@ -54,10 +64,13 @@ namespace FxSsh.Messages
             writer.Write((uint)Extensions.Count);
 
             // RFC 8308 section 2.2: extensions MUST be in ascending order by name.
-            foreach (var kv in Extensions.OrderBy(kv => kv.Key, System.StringComparer.Ordinal))
+            var names = new string[Extensions.Count];
+            Extensions.Keys.CopyTo(names, 0);
+            Array.Sort(names, StringComparer.Ordinal);
+            foreach (var name in names)
             {
-                writer.Write(kv.Key, Encoding.ASCII);
-                writer.Write(kv.Value, Encoding.UTF8);
+                writer.Write(name, Encoding.ASCII);
+                writer.Write(Extensions[name], Encoding.UTF8);
             }
         }
     }

@@ -87,8 +87,11 @@ namespace FxSsh.Algorithms.Catalog
         ];
         /// <summary>
         /// Seeded with only the "none" algorithm, which negotiates whenever
-        /// the peer also offers it; compression methods such as zlib can be
-        /// registered with
+        /// the peer also offers it. Non-identity compression is an extension
+        /// point: no zlib implementation ships, and a custom implementation
+        /// must satisfy RFC 4253 section 6.2 stateful compression semantics
+        /// (Z_SYNC_FLUSH per packet) rather than compressing each packet
+        /// independently. Register one with
         /// <see cref="AlgorithmCollectionBuilder{T}.Add(string, System.Func{string, T})"/>.
         /// </summary>
         public AlgorithmCollectionBuilder<CompressionAlgorithm> CompressionCollection { get; } = [

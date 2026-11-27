@@ -156,5 +156,14 @@ namespace FxSsh.Algorithms
         {
             return _algorithm.SignHash(hash, _sha, RSASignaturePadding.Pkcs1);
         }
+
+        /// <summary>Releases the native RSA key instance.</summary>
+        /// <param name="disposing">True when called from <see cref="PublicKeyAlgorithm.Dispose()"/>.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                _algorithm?.Dispose();
+            base.Dispose(disposing);
+        }
     }
 }

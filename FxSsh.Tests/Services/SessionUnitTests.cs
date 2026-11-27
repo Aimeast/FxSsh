@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Net;
 using System.Net.Sockets;
+using System.Text;
 using System.Threading.Tasks;
 using FxSsh;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
@@ -68,6 +69,32 @@ namespace FxSsh.Tests.Services
         }
 
         [TestMethod]
+        public void Limits_are_validated_and_share_one_outbound_budget()
+        {
+            var (client, server) = CreateSocketPair();
+
+            Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => new Session(
+                server, new Dictionary<string, string>(), "SSH-2.0-X",
+                limits: new SessionLimits { MaximumOutboundBytes = 0 }));
+
+            var session = new Session(server, new Dictionary<string, string>(), "SSH-2.0-X",
+                limits: new SessionLimits { MaximumOutboundBytes = 100 });
+
+            Assert.AreEqual(100L, session.Limits.MaximumOutboundBytes);
+            Assert.IsTrue(session.TryReserveOutboundBuffer(60));
+            Assert.AreEqual(60L, session.BufferedOutboundBytes);
+            Assert.IsFalse(session.TryReserveOutboundBuffer(60));
+            Assert.AreEqual(60L, session.BufferedOutboundBytes);
+
+            session.ReleaseOutboundBuffer(60);
+            Assert.AreEqual(0L, session.BufferedOutboundBytes);
+
+            session.Disconnect();
+            client.Dispose();
+            server.Dispose();
+        }
+
+        [TestMethod]
         public void Disconnect_fires_once_and_is_idempotent()
         {
             var (client, server) = CreateSocketPair();
@@ -97,6 +124,59 @@ namespace FxSsh.Tests.Services
 
             session.Disconnect();
             client.Dispose();
+        }
+
+        [TestMethod]
+        public void Client_identification_accepts_software_versions_and_optional_comments()
+        {
+            Assert.IsTrue(Session.IsSupportedClientVersion("SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.20"));
+            Assert.IsTrue(Session.IsSupportedClientVersion("SSH-2.0-OpenSSH_for_Windows_9.5p1, LibreSSL 3.1.4"));
+            Assert.IsTrue(Session.IsSupportedClientVersion("SSH-2.0-FxSsh"));
+            Assert.IsTrue(Session.IsSupportedClientVersion("SSH-2.0-FxSsh comment with  multiple spaces"));
+
+            // The software version and the separator are mandatory.
+            Assert.IsFalse(Session.IsSupportedClientVersion("SSH-2.0-"));
+            Assert.IsFalse(Session.IsSupportedClientVersion("SSH-2.0- comment"));
+            Assert.IsFalse(Session.IsSupportedClientVersion("SSH-2.0"));
+            Assert.IsFalse(Session.IsSupportedClientVersion("SSH-1.99-FxSsh"));
+            Assert.IsFalse(Session.IsSupportedClientVersion("banner SSH-2.0-FxSsh"));
+
+            // Embedded whitespace/control characters and non-ASCII bytes are
+            // never valid: software must be printable ASCII minus space,
+            // comments printable ASCII plus space.
+            Assert.IsFalse(Session.IsSupportedClientVersion("SSH-2.0-Fx\tSsh"));
+            Assert.IsFalse(Session.IsSupportedClientVersion("SSH-2.0-FxSsh bad\tcomment"));
+            Assert.IsFalse(Session.IsSupportedClientVersion("SSH-2.0-FxSsh bad\x01comment"));
+            Assert.IsFalse(Session.IsSupportedClientVersion("SSH-2.0-FxSsh \u00e9"));
+            Assert.IsFalse(Session.IsSupportedClientVersion(null!));
+        }
+
+        [TestMethod]
+        public async Task StartAsync_accepts_a_banner_with_a_distribution_comment()
+        {
+            var (client, server) = CreateSocketPair();
+            try
+            {
+                const string banner = "SSH-2.0-OpenSSH_9.6p1 Ubuntu-3ubuntu13.20";
+                var session = new Session(server, new Dictionary<string, string>(), "SSH-2.0-Unit");
+                var disconnected = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                session.Disconnected += (_, _) => disconnected.TrySetResult(true);
+
+                _ = session.StartAsync();
+                await client.SendAsync(Encoding.ASCII.GetBytes(banner + "\r\n"), SocketFlags.None);
+                await Task.Delay(500);
+
+                Assert.IsFalse(disconnected.Task.IsCompleted,
+                    "a valid distribution comment must not reject the client banner");
+                Assert.AreEqual(banner, session.ClientVersion);
+
+                session.Disconnect();
+            }
+            finally
+            {
+                client.Dispose();
+                server.Dispose();
+            }
         }
 
         [TestMethod]

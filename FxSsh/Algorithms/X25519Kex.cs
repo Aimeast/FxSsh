@@ -64,5 +64,14 @@ namespace FxSsh.Algorithms
             return new BigInteger(sharedSecret, isUnsigned: true, isBigEndian: true)
                 .ToByteArray(isUnsigned: false, isBigEndian: true);
         }
+
+        /// <summary>Releases the ephemeral X25519 key pair.</summary>
+        /// <param name="disposing">True when called from <see cref="KexAlgorithm.Dispose()"/>.</param>
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+                _x25519?.Dispose();
+            base.Dispose(disposing);
+        }
     }
 }

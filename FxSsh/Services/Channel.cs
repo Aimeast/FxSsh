@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
 using FxSsh.Logging;
@@ -24,16 +25,47 @@ namespace FxSsh.Services
         private readonly object _windowLocker = new object();
         private bool _forceClosed;
 
-        // Async window signal for SendDataAsync. ClientAdjustWindow and
-        // ForceClose swap in a fresh TCS and complete the old one so every
-        // awaiting sender re-checks the window; the synchronous SendData
-        // waiters are woken by the Monitor.PulseAll under the same lock.
+        // Serializes whole SendData/SendDataAsync payloads so the chunks of
+        // one logical write stay contiguous. Without it, two producers on the
+        // same channel (e.g. an SFTP reply and a forwarded data pump) can
+        // interleave chunks and corrupt both streams. Window waits happen
+        // while the gate is held; nothing that runs on the SSH message loop
+        // (OnConfirmed, ClientAdjustWindow, ForceClose) ever waits on it, so
+        // a sender parked on a zero window cannot deadlock the loop.
+        private readonly SemaphoreSlim _sendGate = new(1, 1);
+
+        // Upper bound on bytes this channel may hold for a producer: the
+        // whole payload while it is queued before OPEN_CONFIRMATION, and one
+        // chunk at a time once the channel is confirmed (a direct send
+        // streams from the caller's buffer, so only the chunk being framed
+        // counts as buffered). This is a per-channel fairness sub-limit; the
+        // session-wide byte budget additionally counts every reservation and
+        // every framed packet, so a stalled peer stays bounded. Exceeding the
+        // limit rejects the call instead of growing memory; hosts should
+        // treat the exception as backpressure and stop the producer.
+        private long _bufferedSendBytes;
+
+        /// <summary>Gets the per-channel send-backlog cap from the session limits.</summary>
+        internal int MaximumBufferedSendBytes
+            => _connectionService._session.Limits.MaximumBufferedSendBytesPerChannel;
+
+        /// <summary>Gets the bytes currently reserved by this channel's send backlog.</summary>
+        public long BufferedSendBytes => System.Threading.Interlocked.Read(ref _bufferedSendBytes);
+
+        // EOF/CLOSE requested on a server-initiated channel before the peer
+        // confirmed it: defer them until the queued data has been flushed.
+        private bool _pendingEof;
+        private PendingClose _pendingClose;
+
+        // Window signal shared by synchronous and asynchronous senders.
+        // ClientAdjustWindow and ForceClose swap in a fresh TCS and complete
+        // the old one so every waiter re-checks the window.
         private TaskCompletionSource<bool> _windowTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         // Number of senders currently parked in WaitForWindowAsync. The TCS
         // swap in ClientAdjustWindow/ForceClose is only needed when this is
-        // non-zero; the common case (no async sender waiting) then allocates
-        // no TCS per WINDOW_ADJUST at all.
+        // non-zero; the common case (no sender waiting) then allocates no
+        // TCS per WINDOW_ADJUST at all.
         private int _windowWaiters;
 
         /// <summary>
@@ -51,8 +83,30 @@ namespace FxSsh.Services
         public Channel(ConnectionService connectionService,
             uint clientChannelId, uint clientInitialWindowSize, uint clientMaxPacketSize,
             uint serverChannelId)
+            : this(connectionService, clientChannelId, clientInitialWindowSize, clientMaxPacketSize,
+                serverChannelId, allowZeroMaxPacket: false)
+        {
+        }
+
+        /// <summary>
+        /// Construct a server-initiated channel awaiting OPEN_CONFIRMATION.
+        /// ClientChannelId is 0 until the peer confirms; outbound SendData
+        /// calls are buffered until OnConfirmed resolves the peer channel.
+        /// </summary>
+        protected Channel(ConnectionService connectionService, uint serverChannelId)
+            : this(connectionService, 0, 0, 0, serverChannelId, allowZeroMaxPacket: true)
+        {
+            PendingConfirmation = true;
+        }
+
+        private Channel(ConnectionService connectionService,
+            uint clientChannelId, uint clientInitialWindowSize, uint clientMaxPacketSize,
+            uint serverChannelId, bool allowZeroMaxPacket)
         {
             ArgumentNullException.ThrowIfNull(connectionService);
+            if (!allowZeroMaxPacket && clientMaxPacketSize == 0)
+                throw new ArgumentOutOfRangeException(nameof(clientMaxPacketSize),
+                    "A channel's maximum packet size must be greater than zero.");
 
             _connectionService = connectionService;
 
@@ -68,17 +122,6 @@ namespace FxSsh.Services
         }
 
         /// <summary>
-        /// Construct a server-initiated channel awaiting OPEN_CONFIRMATION.
-        /// ClientChannelId is 0 until the peer confirms; outbound SendData
-        /// calls are buffered until OnConfirmed resolves the peer channel.
-        /// </summary>
-        protected Channel(ConnectionService connectionService, uint serverChannelId)
-            : this(connectionService, 0, 0, 0, serverChannelId)
-        {
-            PendingConfirmation = true;
-        }
-
-        /// <summary>
         /// Resolve the peer channel after receiving OPEN_CONFIRMATION. Flushes
         /// any SendData bytes queued while pending. Safe to call once.
         /// </summary>
@@ -90,47 +133,48 @@ namespace FxSsh.Services
             if (!PendingConfirmation)
                 return;
 
-            // Publish the resolved peer window/ids BEFORE clearing the pending
-            // flag: a concurrent SendData* must either observe the pending flag
-            // (and queue its bytes) or observe the real window - never a
-            // cleared flag with the constructor's zero window, which would
-            // park the sender on the window condition forever.
-            ClientChannelId = clientChannelId;
-            ClientInitialWindowSize = peerInitialWindowSize;
-            ClientMaxPacketSize = peerMaximumPacketSize;
-            PeerInitialWindowSize = peerInitialWindowSize;
-            PeerMaximumPacketSize = peerMaximumPacketSize;
-
+            TaskCompletionSource<bool> signal = null;
             lock (_windowLocker)
             {
+                if (!PendingConfirmation)
+                    return;
+
+                // Publish the resolved peer window/ids BEFORE clearing the
+                // pending flag: a concurrent SendData* must either observe the
+                // pending flag (and queue its bytes) or observe the real
+                // window - never a cleared flag with the constructor's zero
+                // window, which would park the sender forever.
+                ClientChannelId = clientChannelId;
+                ClientInitialWindowSize = peerInitialWindowSize;
+                ClientMaxPacketSize = peerMaximumPacketSize;
                 ClientWindowSize = peerInitialWindowSize;
                 PendingConfirmation = false;
 
-                // Wake any sender that already parked on the zero window -
-                // BOTH kinds: Monitor.Wait (synchronous SendData) via
-                // PulseAll, and the async WaitForWindowAsync TCS waiters.
-                Monitor.PulseAll(_windowLocker);
-                TaskCompletionSource<bool> signal = null;
+                // Flush bytes produced while pending. Window credit is
+                // reserved and the frames are enqueued while _windowLocker is
+                // held, so a sender that wakes up after the confirmation
+                // cannot overtake the queued bytes. Nothing in this helper
+                // blocks: bytes that do not fit in the peer's initial window
+                // stay queued for ClientAdjustWindow.
+                FlushPendingSendsLocked();
+
+                // A close/EOF requested while the channel was being opened
+                // must follow the queued data, never precede it - including
+                // the remainder FlushPendingSendsLocked could not fit into
+                // the peer's initial window; ClientAdjustWindow fires it once
+                // that remainder has been framed.
+                if (_pendingSends.Count == 0)
+                    SendPendingCloseOrEofLocked();
+
+                // Wake every waiter parked on the zero window.
                 if (_windowWaiters > 0)
                 {
                     signal = _windowTcs;
                     _windowTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
                 }
-
-                // Flush bytes produced while pending (in arrival order).
-                // SendData re-enters _windowLocker (Monitor is reentrant) and
-                // sends directly now that the flag is cleared.
-                if (_pendingSends.Count > 0)
-                {
-                    if (Log.IsEnabled(LogLevel.Debug))
-                        Log.Debug($"Channel {ServerChannelId} confirmed; flushing {_pendingSends.Count} buffered chunks.");
-                    foreach (var chunk in _pendingSends)
-                        SendData(chunk);
-                    _pendingSends.Clear();
-                }
-
-                signal?.TrySetResult(true);
             }
+
+            signal?.TrySetResult(true);
         }
 
         /// <summary>Gets the channel identifier the client assigned to this channel (the peer's sender channel).</summary>
@@ -161,11 +205,6 @@ namespace FxSsh.Services
         /// </summary>
         public bool PendingConfirmation { get => _pendingConfirmation; private set => _pendingConfirmation = value; }
 
-        /// <summary>Window advertised by the peer once OPEN_CONFIRMATION arrives; 0 until then.</summary>
-        public uint PeerInitialWindowSize { get; private set; }
-        /// <summary>Maximum packet size the peer accepts once OPEN_CONFIRMATION arrives; 0 until then.</summary>
-        public uint PeerMaximumPacketSize { get; private set; }
-
         /// <summary>Queued outbound bytes produced before OPEN_CONFIRMATION arrives.</summary>
         private readonly System.Collections.Generic.List<ReadOnlyMemory<byte>> _pendingSends = [];
 
@@ -185,8 +224,21 @@ namespace FxSsh.Services
         /// </summary>
         public bool IsForceClosed => _forceClosed;
 
-        /// <summary>Occurs when channel data arrives from the peer (SSH_MSG_CHANNEL_DATA, RFC 4254 section 5.2).</summary>
+        /// <summary>
+        /// Occurs when channel data arrives from the peer (SSH_MSG_CHANNEL_DATA, RFC 4254 section 5.2).
+        /// The payload memory is only valid for the duration of the handler:
+        /// it is backed by a pooled buffer that the message loop recycles once
+        /// dispatch finishes, so a handler that needs the bytes later must
+        /// copy them.
+        /// </summary>
         public event EventHandler<ReadOnlyMemory<byte>> DataReceived;
+        /// <summary>
+        /// Ownership-aware variant of <see cref="DataReceived"/> used by the
+        /// in-library forwarding bridge and SFTP engine. Fires before the
+        /// public event while the lease is still valid; subscribers call
+        /// <see cref="ChannelDataLease.TryRetainOrCopy"/> to take ownership.
+        /// </summary>
+        internal event EventHandler<ChannelDataLease> LeaseReceived;
         /// <summary>Occurs when the peer marks its side of the stream closed with SSH_MSG_CHANNEL_EOF.</summary>
         public event EventHandler EofReceived;
         /// <summary>Occurs when the peer closes the channel with SSH_MSG_CHANNEL_CLOSE; the channel is torn down once both sides have closed.</summary>
@@ -197,10 +249,11 @@ namespace FxSsh.Services
         /// <summary>
         /// Raised exactly once when the channel is force-closed (peer rejected
         /// the open, session teardown, or both sides closed). Bridges that
-        /// hold external resources (e.g. a forwarded TCP socket) must release
-        /// them when this fires - no CHANNEL_CLOSE exchange will follow.
+        /// hold external resources (e.g. a forwarded TCP socket or a terminal)
+        /// must release them when this fires - no CHANNEL_CLOSE exchange will
+        /// follow.
         /// </summary>
-        internal event EventHandler ForceClosed;
+        public event EventHandler ForceClosed;
 
         /// <summary>
         /// Sends the supplied bytes to the peer as SSH_MSG_CHANNEL_DATA
@@ -209,161 +262,255 @@ namespace FxSsh.Services
         /// packet size. Blocks while the peer's window is exhausted until a
         /// SSH_MSG_CHANNEL_WINDOW_ADJUST arrives; throws
         /// <see cref="ObjectDisposedException"/> if the channel is force-closed
-        /// while blocked.
+        /// while blocked. Whole calls are serialized, so chunks from
+        /// concurrent senders are never interleaved.
         /// </summary>
         /// <param name="data">
-        /// The payload to send. The buffer is not copied; on a channel still
-        /// awaiting OPEN_CONFIRMATION the bytes are queued, so the caller must
-        /// keep the underlying buffer valid.
+        /// The payload to send. On a channel still awaiting
+        /// OPEN_CONFIRMATION the bytes are copied and queued, so the caller
+        /// may recycle the buffer as soon as this method returns.
         /// </param>
+        /// <exception cref="InvalidOperationException">
+        /// Queueing the payload on a channel that still awaits
+        /// OPEN_CONFIRMATION would exceed its send-backlog bound; the caller
+        /// should treat this as backpressure and stop producing.
+        /// </exception>
         public void SendData(ReadOnlyMemory<byte> data)
-        {
-            if (data.Length == 0)
-            {
-                return;
-            }
-
-            // Server-initiated channels buffer outbound bytes until the peer's
-            // OPEN_CONFIRMATION resolves ClientChannelId and the peer window.
-            // The check-and-queue is atomic with OnConfirmed's flag clear
-            // (both under _windowLocker): a sender must never fall through to
-            // the direct path while the peer window is still unresolved.
-            // Slice the caller's memory instead of Clone() - ReadOnlyMemory<byte>
-            // is a by-value view over the caller's buffer, safe to retain only
-            // if the caller guarantees the buffer outlives the flush. Downstream
-            // services hand us bytes they themselves own for the channel's
-            // lifetime (terminal pipes, tcp sockets, sftp), so a slice here is
-            // safe without a copy.
-            lock (_windowLocker)
-            {
-                if (PendingConfirmation)
-                {
-                    _pendingSends.Add(data);
-                    return;
-                }
-            }
-
-            // Fresh message per chunk: Session.SendMessage may hold the
-            // message by reference in _blockedMessages during rekey, so a
-            // shared instance would alias and corrupt every queued chunk.
-            var msg = new ChannelDataMessage();
-            msg.RecipientChannel = ClientChannelId;
-
-            var total = (uint)data.Length;
-            var offset = 0L;
-            do
-            {
-                uint packetSize;
-                lock (_windowLocker)
-                {
-                    packetSize = Math.Min(Math.Min(ClientWindowSize, ClientMaxPacketSize), total);
-                    if (packetSize > 0)
-                    {
-                        ClientWindowSize -= packetSize;
-                    }
-                    else
-                    {
-                        // Peer's receive window is exhausted. Park on a Monitor
-                        // condition variable instead of the old
-                        // EventWaitHandle Set/Thread.Sleep(1)/Reset pulse:
-                        // the sleep ran on the ConnectionService message loop
-                        // (the single SSH receive thread) and capped throughput
-                        // at ~1000 packets/sec under sustained load. Monitor.Wait
-                        // releases the lock; ClientAdjustWindow PulseAll's the
-                        // moment the peer's WINDOW_ADJUST arrives, and
-                        // ForceClose PulseAll's to unblock us during teardown.
-                        // Re-check _forceClosed to keep the old "waiting on a
-                        // disposed handle throws" teardown semantics.
-                        Monitor.Wait(_windowLocker);
-                        if (_forceClosed)
-                            throw new ObjectDisposedException(nameof(Channel));
-                        // Window may still be 0 after a spurious wake; loop
-                        // around and re-evaluate packetSize.
-                        continue;
-                    }
-                }
-
-                // Zero-copy slice: ChannelDataMessage.Data is now a
-                // ReadOnlyMemory<byte>, so framing the per-packet chunk is just
-                // a view over the caller's buffer - no new byte[packetSize]
-                // and no Array.Copy per chunk (was the E hot-path allocation).
-                msg.Data = data.Slice((int)offset, (int)packetSize);
-                _connectionService._session.SendMessage(msg);
-
-                total -= packetSize;
-                offset += packetSize;
-            } while (total > 0);
-        }
+            => SendDataCoreAsync(data, CancellationToken.None).GetAwaiter().GetResult();
 
         /// <summary>
         /// Async equivalent of <see cref="SendData"/> for use from async pumps
         /// (e.g. PortForwardingService bridges). When the peer's receive window
         /// is exhausted it awaits the window signal instead of blocking a
-        /// thread in Monitor.Wait; the chunking, window accounting and
-        /// zero-copy slicing are identical to the synchronous path.
+        /// thread; the chunking, window accounting and serialization are
+        /// identical to the synchronous path.
         /// </summary>
-        public async Task SendDataAsync(ReadOnlyMemory<byte> data)
+        /// <exception cref="InvalidOperationException">
+        /// Queueing the payload on a channel that still awaits
+        /// OPEN_CONFIRMATION would exceed its send-backlog bound; the caller
+        /// should treat this as backpressure and stop producing.
+        /// </exception>
+        public Task SendDataAsync(ReadOnlyMemory<byte> data)
+            => SendDataCoreAsync(data, CancellationToken.None).AsTask();
+
+        private async ValueTask SendDataCoreAsync(ReadOnlyMemory<byte> data, CancellationToken token)
         {
             if (data.Length == 0)
-            {
                 return;
-            }
 
-            // Same buffering semantics as SendData: server-initiated channels
-            // buffer outbound bytes until the peer's OPEN_CONFIRMATION. The
-            // check-and-queue is atomic with OnConfirmed's flag clear (both
-            // under _windowLocker) so a sender never falls through to the
-            // direct path while the peer window is still unresolved.
-            lock (_windowLocker)
+            await _sendGate.WaitAsync(token).ConfigureAwait(false);
+            try
             {
-                if (PendingConfirmation)
-                {
-                    _pendingSends.Add(data);
-                    if (Log.IsEnabled(LogLevel.Trace))
-                        Log.Trace($"SendDataAsync queued: channel={ServerChannelId} len={data.Length}.");
-                    return;
-                }
-            }
-
-            // Fresh message per chunk: Session.SendMessage may hold the
-            // message by reference in _blockedMessages during rekey, so a
-            // shared instance would alias and corrupt every queued chunk.
-            var msg = new ChannelDataMessage();
-            msg.RecipientChannel = ClientChannelId;
-
-            var total = (uint)data.Length;
-            var offset = 0L;
-            while (total > 0)
-            {
-                uint packetSize;
                 lock (_windowLocker)
                 {
-                    packetSize = Math.Min(Math.Min(ClientWindowSize, ClientMaxPacketSize), total);
-                    if (packetSize > 0)
+                    if (_forceClosed)
+                        throw new ObjectDisposedException(nameof(Channel));
+
+                    if (PendingConfirmation)
                     {
-                        ClientWindowSize -= packetSize;
+                        // The whole payload is copied into the pre-confirmation
+                        // backlog, so it is reserved as a whole: a call larger
+                        // than the backlog cap is rejected up front instead of
+                        // queuing unbounded bytes. The queue releases the
+                        // reservation as it flushes (or on force close).
+                        if (!TryReserveBufferedBytes(data.Length))
+                            ThrowBufferedSendOverflow();
+                        _pendingSends.Add(data.ToArray());
+                        if (Log.IsEnabled(LogLevel.Trace))
+                            Log.Trace($"SendData queued: channel={ServerChannelId} len={data.Length}.");
+                        return;
                     }
                 }
 
-                if (packetSize == 0)
+                var total = (uint)data.Length;
+                var offset = 0;
+                while (total > 0)
                 {
-                    // Peer's receive window is exhausted. Await the window
-                    // signal (completed by ClientAdjustWindow / ForceClose)
-                    // instead of Monitor.Wait, so no thread is blocked. The
-                    // loop re-checks the window after every wake-up, exactly
-                    // like the synchronous path re-evaluates after PulseAll.
-                    if (Log.IsEnabled(LogLevel.Trace))
-                        Log.Trace($"SendDataAsync parked on channel {ServerChannelId}: peer window exhausted ({ClientWindowSize} bytes left).");
-                    await WaitForWindowAsync();
-                    continue;
+                    if (Log.IsEnabled(LogLevel.Trace) && ClientWindowSize == 0)
+                        Log.Trace($"SendData parked on channel {ServerChannelId}: peer window exhausted.");
+
+                    var packetSize = await ReserveWindowAsync(total).ConfigureAwait(false);
+
+                    // Reserve credit one chunk at a time: a direct send
+                    // streams from the caller's buffer, so a call larger than
+                    // the cap flows through a healthy window instead of
+                    // failing up front - only the chunk being framed is held
+                    // by the channel.
+                    if (!TryReserveBufferedBytes((int)packetSize))
+                        ThrowBufferedSendOverflow();
+                    try
+                    {
+                        SendChunk(data.Slice(offset, (int)packetSize));
+                    }
+                    finally
+                    {
+                        ReleaseBufferedBytes((int)packetSize);
+                    }
+
+                    total -= packetSize;
+                    offset += (int)packetSize;
+                }
+            }
+            finally
+            {
+                _sendGate.Release();
+            }
+        }
+
+        /// <summary>
+        /// Reserve channel send-backlog credit for <paramref name="length"/>
+        /// bytes. The per-channel cap is a fairness sub-limit inside the
+        /// session-wide outbound budget; both must accept the reservation.
+        /// </summary>
+        private bool TryReserveBufferedBytes(int length)
+        {
+            var total = System.Threading.Interlocked.Add(ref _bufferedSendBytes, length);
+            if (total <= MaximumBufferedSendBytes
+                && _connectionService._session.TryReserveOutboundBuffer(length))
+                return true;
+
+            System.Threading.Interlocked.Add(ref _bufferedSendBytes, -length);
+            return false;
+        }
+
+        private void ReleaseBufferedBytes(int length)
+        {
+            System.Threading.Interlocked.Add(ref _bufferedSendBytes, -length);
+            _connectionService._session.ReleaseOutboundBuffer(length);
+        }
+
+        private void ThrowBufferedSendOverflow()
+            => throw new InvalidOperationException(
+                string.Format("Channel {0} send backlog exceeds {1} bytes; the peer is not consuming data.", ServerChannelId, MaximumBufferedSendBytes));
+
+        /// <summary>
+        /// Reserve window credit for one chunk, awaiting the window signal
+        /// until the peer adjusts its window. Callers hold
+        /// <see cref="_sendGate"/>; the synchronous <see cref="SendData"/>
+        /// wrapper blocks on the same signal.
+        /// </summary>
+        private async ValueTask<uint> ReserveWindowAsync(uint requested)
+        {
+            while (true)
+            {
+                lock (_windowLocker)
+                {
+                    if (_forceClosed)
+                        throw new ObjectDisposedException(nameof(Channel));
+
+                    var packetSize = Math.Min(Math.Min(ClientWindowSize, EffectiveMaxPacketSize), requested);
+                    if (packetSize > 0)
+                    {
+                        ClientWindowSize -= packetSize;
+                        return packetSize;
+                    }
                 }
 
-                // Zero-copy slice: same framing as SendData.
-                msg.Data = data.Slice((int)offset, (int)packetSize);
-                _connectionService._session.SendMessage(msg);
+                await WaitForWindowAsync().ConfigureAwait(false);
+            }
+        }
 
-                total -= packetSize;
-                offset += packetSize;
+        /// <summary>
+        /// The peer's maximum packet size capped by the library's own
+        /// data-packet size: a peer advertising 4 GiB must not make the server
+        /// frame and queue megabytes in a single SSH packet (which would also
+        /// exceed this library's own 35 KB receive limit and many clients'
+        /// limits). ConnectionService rejects a zero value at open time.
+        /// </summary>
+        private uint EffectiveMaxPacketSize
+        {
+            get
+            {
+                Debug.Assert(ClientMaxPacketSize > 0, "OPEN_CONFIRMATION must publish a positive maximum packet size.");
+                return Math.Min(ClientMaxPacketSize, (uint)Session.LocalChannelDataPacketSize);
+            }
+        }
+
+        private void SendChunk(ReadOnlyMemory<byte> chunk)
+        {
+            // Fresh message per chunk: Session.SendMessage may hold the
+            // message by reference in _blockedMessages during rekey, so a
+            // shared instance would alias and corrupt every queued chunk.
+            _connectionService._session.SendMessage(new ChannelDataMessage
+            {
+                RecipientChannel = ClientChannelId,
+                Data = chunk,
+            });
+        }
+
+        /// <summary>
+        /// Flush the pre-confirmation backlog without ever blocking: window
+        /// credit is reserved under <see cref="_windowLocker"/> and chunks are
+        /// enqueued immediately. Bytes that do not fit in the current window
+        /// stay queued (or have their remainder requeued) and are sent by the
+        /// next <see cref="ClientAdjustWindow"/>.
+        /// </summary>
+        private void FlushPendingSendsLocked()
+        {
+            if (_pendingSends.Count == 0)
+                return;
+
+            if (Log.IsEnabled(LogLevel.Debug))
+                Log.Debug($"Channel {ServerChannelId} confirmed; flushing {_pendingSends.Count} buffered chunks.");
+
+            System.Collections.Generic.List<ReadOnlyMemory<byte>> remaining = null;
+            var releasedBytes = 0;
+            foreach (var buffered in _pendingSends)
+            {
+                var offset = 0;
+                while (offset < buffered.Length)
+                {
+                    var packetSize = Math.Min(
+                        (uint)(buffered.Length - offset),
+                        Math.Min(ClientWindowSize, EffectiveMaxPacketSize));
+                    if (packetSize == 0)
+                    {
+                        (remaining ??= []).Add(buffered.Slice(offset));
+                        break;
+                    }
+
+                    ClientWindowSize -= packetSize;
+                    SendChunk(buffered.Slice(offset, (int)packetSize));
+                    releasedBytes += (int)packetSize;
+                    offset += (int)packetSize;
+                }
+            }
+
+            _pendingSends.Clear();
+            if (remaining != null)
+                _pendingSends.AddRange(remaining);
+
+            // Release the reservations for the prefix that actually went out
+            // only after the whole flush succeeded. If a SendChunk throws
+            // mid-loop, _pendingSends still holds the original buffers and
+            // ForceClose releases their full lengths exactly once.
+            ReleaseBufferedBytes(releasedBytes);
+        }
+
+        /// <summary>
+        /// Fire a close/EOF that was deferred behind queued data. The caller
+        /// holds <see cref="_windowLocker"/> and <see cref="_pendingSends"/>
+        /// is empty, so the deferred message can never precede those bytes on
+        /// the wire.
+        /// </summary>
+        private void SendPendingCloseOrEofLocked()
+        {
+            if (_pendingClose is { } pendingClose)
+            {
+                ServerClosed = true;
+                if (pendingClose.SignalName != null)
+                {
+                    SendSignalCloseCore(pendingClose.SignalName, pendingClose.CoreDumped,
+                        pendingClose.ErrorMessage, pendingClose.Language);
+                }
+                else
+                {
+                    SendCloseCore(pendingClose.ExitCode);
+                }
+            }
+            else if (_pendingEof)
+            {
+                SendEofCore();
             }
         }
 
@@ -389,7 +536,7 @@ namespace FxSsh.Services
                 }
                 try
                 {
-                    await signal.Task;
+                    await signal.Task.ConfigureAwait(false);
                 }
                 finally
                 {
@@ -409,13 +556,51 @@ namespace FxSsh.Services
         /// channel with a protocol-error disconnect.
         /// </summary>
         public void SendEof()
-        {
-            if (ServerMarkedEof || _forceClosed)
-                return;
+            => SendEofCoreAsync(CancellationToken.None).GetAwaiter().GetResult();
 
+        /// <summary>
+        /// Sends SSH_MSG_CHANNEL_EOF after waiting for the send gate, so any
+        /// SendData/SendDataAsync call that is in progress (or already queued
+        /// on the gate) has framed its chunks first. Use this when a producer
+        /// and the EOF are driven by different tasks (e.g. terminal output
+        /// followed by the shell exit notification).
+        /// </summary>
+        /// <param name="cancellationToken">Cancels the wait for in-flight sends.</param>
+        public Task SendEofAsync(CancellationToken cancellationToken = default)
+            => SendEofCoreAsync(cancellationToken).AsTask();
+
+        private async ValueTask SendEofCoreAsync(CancellationToken cancellationToken)
+        {
+            await _sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                lock (_windowLocker)
+                {
+                    if (_forceClosed || ServerMarkedEof)
+                        return;
+
+                    if (PendingConfirmation || _pendingSends.Count > 0)
+                    {
+                        // Do not overtake bytes that are still queued: the
+                        // pre-confirmation backlog, or the remainder waiting
+                        // for peer window credit after confirmation.
+                        _pendingEof = true;
+                        return;
+                    }
+
+                    SendEofCore();
+                }
+            }
+            finally
+            {
+                _sendGate.Release();
+            }
+        }
+
+        private void SendEofCore()
+        {
             ServerMarkedEof = true;
-            var msg = new ChannelEofMessage { RecipientChannel = ClientChannelId };
-            _connectionService._session.SendMessage(msg);
+            _connectionService._session.SendMessage(new ChannelEofMessage { RecipientChannel = ClientChannelId });
         }
 
         /// <summary>
@@ -426,16 +611,57 @@ namespace FxSsh.Services
         /// </summary>
         /// <param name="exitCode">Optional exit code to report as "exit-status" before the close.</param>
         public void SendClose(uint? exitCode = null)
-        {
-            if (ServerClosed)
-                return;
+            => SendCloseCoreAsync(exitCode, CancellationToken.None).GetAwaiter().GetResult();
 
-            ServerClosed = true;
+        private void SendCloseCore(uint? exitCode)
+        {
             if (exitCode.HasValue)
                 _connectionService._session.SendMessage(new ExitStatusMessage { RecipientChannel = ClientChannelId, ExitStatus = exitCode.Value });
             _connectionService._session.SendMessage(new ChannelCloseMessage { RecipientChannel = ClientChannelId });
 
             CheckBothClosed();
+        }
+
+        /// <summary>
+        /// Sends SSH_MSG_CHANNEL_CLOSE (with an optional exit-status first)
+        /// after waiting for the send gate, so the close cannot overtake data
+        /// still being framed by another producer. Subject to the same
+        /// pre-confirmation deferral as <see cref="SendClose"/>.
+        /// </summary>
+        /// <param name="exitCode">Optional exit status to report before the close.</param>
+        /// <param name="cancellationToken">Cancels the wait for in-flight sends.</param>
+        public Task SendCloseAsync(uint? exitCode = null, CancellationToken cancellationToken = default)
+            => SendCloseCoreAsync(exitCode, cancellationToken).AsTask();
+
+        private async ValueTask SendCloseCoreAsync(uint? exitCode, CancellationToken cancellationToken)
+        {
+            await _sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                lock (_windowLocker)
+                {
+                    if (_forceClosed || ServerClosed)
+                        return;
+
+                    if (PendingConfirmation || _pendingSends.Count > 0)
+                    {
+                        // Defer until every queued byte has been framed, so
+                        // CLOSE never precedes data the peer has not seen:
+                        // the pre-confirmation backlog, or the remainder
+                        // waiting for peer window credit after confirmation.
+                        _pendingClose ??= PendingClose.ForExitStatus(exitCode);
+                        return;
+                    }
+
+                    ServerClosed = true;
+                }
+
+                SendCloseCore(exitCode);
+            }
+            finally
+            {
+                _sendGate.Release();
+            }
         }
 
         /// <summary>
@@ -449,11 +675,51 @@ namespace FxSsh.Services
         /// <param name="errorMessage">Human-readable explanation (may be empty).</param>
         /// <param name="language">Language tag per RFC 3066 (defaults to "en").</param>
         public void SendSignalClose(string signalName, bool coreDumped = false, string errorMessage = "", string language = "en")
-        {
-            if (ServerClosed)
-                return;
+            => SendSignalCloseCoreAsync(signalName, coreDumped, errorMessage, language, CancellationToken.None)
+                .GetAwaiter().GetResult();
 
-            ServerClosed = true;
+        /// <summary>
+        /// Async variant of <see cref="SendSignalClose"/>. Waits for the send
+        /// gate so the exit-signal cannot overtake data still being framed by
+        /// another producer.
+        /// </summary>
+        public Task SendSignalCloseAsync(string signalName, bool coreDumped = false,
+            string errorMessage = "", string language = "en", CancellationToken cancellationToken = default)
+            => SendSignalCloseCoreAsync(signalName, coreDumped, errorMessage, language, cancellationToken)
+                .AsTask();
+
+        private async ValueTask SendSignalCloseCoreAsync(string signalName, bool coreDumped,
+            string errorMessage, string language, CancellationToken cancellationToken)
+        {
+            await _sendGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                lock (_windowLocker)
+                {
+                    if (_forceClosed || ServerClosed)
+                        return;
+
+                    if (PendingConfirmation || _pendingSends.Count > 0)
+                    {
+                        // Same deferral as SendCloseCoreAsync: the exit-signal
+                        // must not precede data that is still queued.
+                        _pendingClose ??= PendingClose.ForSignal(signalName, coreDumped, errorMessage, language);
+                        return;
+                    }
+
+                    ServerClosed = true;
+                }
+
+                SendSignalCloseCore(signalName, coreDumped, errorMessage, language);
+            }
+            finally
+            {
+                _sendGate.Release();
+            }
+        }
+
+        private void SendSignalCloseCore(string signalName, bool coreDumped, string errorMessage, string language)
+        {
             _connectionService._session.SendMessage(new ExitSignalMessage
             {
                 RecipientChannel = ClientChannelId,
@@ -468,11 +734,26 @@ namespace FxSsh.Services
         }
 
         internal void OnData(ReadOnlyMemory<byte> data)
+            => OnData(ChannelDataLease.Wrap(data));
+
+        internal void OnData(ChannelDataLease lease)
         {
+            var data = lease.Memory;
             if (Log.IsEnabled(LogLevel.Trace))
                 Log.Trace($"Channel {ServerChannelId} received {data.Length} bytes.");
+
+            // RFC 4254 section 5.2: the peer must not exceed the maximum
+            // packet size or the receive window it was granted. Both are
+            // enforced before the payload reaches any service.
+            if (data.Length > ServerMaxPacketSize)
+            {
+                throw new SshConnectionException(
+                    string.Format("Channel data packet of {0} bytes exceeds the maximum of {1}.", data.Length, ServerMaxPacketSize),
+                    DisconnectReason.ProtocolError);
+            }
             ServerAttemptAdjustWindow((uint)data.Length);
 
+            LeaseReceived?.Invoke(this, lease);
             DataReceived?.Invoke(this, data);
         }
 
@@ -504,21 +785,26 @@ namespace FxSsh.Services
             TaskCompletionSource<bool> signal = null;
             lock (_windowLocker)
             {
-                ClientWindowSize += bytesToAdd;
+                // Saturate instead of wrapping: a malicious/huge adjust must
+                // not reset the credit to a tiny value via uint overflow.
+                ClientWindowSize = (uint)Math.Min(uint.MaxValue, (ulong)ClientWindowSize + bytesToAdd);
 
-                // Wake every SendData loop parked on the window condition.
-                // Monitor.PulseAll (not Pulse) so all blocked senders re-check;
-                // the wake happens under the same lock, eliminating the old
-                // Set/Thread.Sleep(1)/Reset pulse that stalled the SSH receive
-                // thread once per WINDOW_ADJUST.
-                Monitor.PulseAll(_windowLocker);
+                // Queued bytes from before confirmation have priority over
+                // any sender that is waiting for this credit.
+                if (_pendingSends.Count > 0)
+                    FlushPendingSendsLocked();
 
-                // Also wake async senders parked in WaitForWindowAsync. Swap
-                // in a fresh TCS and complete the old one so every awaiting
-                // sender re-checks the window - but only when there IS an
-                // awaiting sender. The common case (synchronous SendData, or
-                // an async sender whose window never drained) then allocates
-                // no TCS per WINDOW_ADJUST.
+                // The backlog is gone: a close/EOF deferred behind it -
+                // requested before confirmation, or while a remainder was
+                // waiting for window credit - follows the last queued byte.
+                if (_pendingSends.Count == 0)
+                    SendPendingCloseOrEofLocked();
+
+                // Wake every sender parked in WaitForWindowAsync. Swap in a
+                // fresh TCS and complete the old one so every waiter re-checks
+                // the window - but only when there IS a waiter. The common
+                // case (a sender whose window never drained) then allocates no
+                // TCS per WINDOW_ADJUST.
                 if (_windowWaiters > 0)
                 {
                     signal = _windowTcs;
@@ -531,6 +817,16 @@ namespace FxSsh.Services
 
         private void ServerAttemptAdjustWindow(uint messageLength)
         {
+            if (messageLength > ServerWindowSize)
+            {
+                // RFC 4254 section 5.2: data beyond the advertised receive
+                // window is a protocol violation; letting the subtraction wrap
+                // would hand the peer a huge window.
+                throw new SshConnectionException(
+                    string.Format("Channel data of {0} bytes exceeds the remaining window of {1}.", messageLength, ServerWindowSize),
+                    DisconnectReason.ProtocolError);
+            }
+
             ServerWindowSize -= messageLength;
 
             // RFC 4254 section 5.2: the local window advertised to the peer is topped
@@ -584,14 +880,16 @@ namespace FxSsh.Services
                 if (_forceClosed)
                     return;
                 _forceClosed = true;
+                // Nothing queued before confirmation can be delivered anymore;
+                // release the payload copies and their backlog reservations
+                // promptly.
+                foreach (var pending in _pendingSends)
+                    ReleaseBufferedBytes(pending.Length);
+                _pendingSends.Clear();
 
-                // Wake any SendData loop parked on the window condition; it
-                // re-checks _forceClosed and throws ObjectDisposedException,
-                // matching the previous "waiting on a closed handle" semantics.
-                Monitor.PulseAll(_windowLocker);
-
-                // Also wake async senders parked in WaitForWindowAsync; they
-                // re-check _forceClosed and throw ObjectDisposedException.
+                // Wake every sender parked in WaitForWindowAsync; it re-checks
+                // _forceClosed and throws ObjectDisposedException, matching the
+                // previous "waiting on a closed handle" semantics.
                 if (_windowWaiters > 0)
                 {
                     signal = _windowTcs;
@@ -601,9 +899,49 @@ namespace FxSsh.Services
 
             signal?.TrySetResult(true);
 
-            ForceClosed?.Invoke(this, EventArgs.Empty);
+            // ForceClosed handlers are host/bridge code (SFTP teardown,
+            // forwarded-socket release): one throwing subscriber must not
+            // skip the remaining subscribers or the RemoveChannel call below,
+            // which would leave a closed channel registered for the rest of
+            // the session and leak the resources the other subscribers hold.
+            var forceClosed = ForceClosed;
+            if (forceClosed != null)
+            {
+                foreach (var handler in forceClosed.GetInvocationList())
+                {
+                    try { ((EventHandler)handler)(this, EventArgs.Empty); }
+                    catch (Exception ex) { Log.Warn($"Channel {ServerChannelId} ForceClosed handler failed: {ex.Message}"); }
+                }
+            }
 
             _connectionService.RemoveChannel(this);
+        }
+
+        /// <summary>
+        /// A close requested before OPEN_CONFIRMATION, carrying either an
+        /// exit-status or an exit-signal. Stored as one deferred action so the
+        /// pending state cannot hold contradictory fields.
+        /// </summary>
+        private sealed class PendingClose
+        {
+            public uint? ExitCode { get; private init; }
+            public string SignalName { get; private init; }
+            public bool CoreDumped { get; private init; }
+            public string ErrorMessage { get; private init; }
+            public string Language { get; private init; }
+
+            public static PendingClose ForExitStatus(uint? exitCode)
+                => new() { ExitCode = exitCode };
+
+            public static PendingClose ForSignal(string signalName, bool coreDumped,
+                string errorMessage, string language)
+                => new()
+                {
+                    SignalName = signalName ?? string.Empty,
+                    CoreDumped = coreDumped,
+                    ErrorMessage = errorMessage ?? string.Empty,
+                    Language = language ?? "en",
+                };
         }
     }
 }

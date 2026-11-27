@@ -78,6 +78,18 @@ namespace FxSsh.Tests.Wire
         }
 
         [TestMethod]
+        public void ReadBytesAsMemory_rejects_a_negative_length_without_advancing()
+        {
+            var reader = new SshDataReader(new byte[] { 0x01, 0x02 });
+
+            // A hostile uint32 length cast to a negative int must be
+            // rejected by the bounds check, not reach Span.Slice.
+            Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => reader.ReadBytesAsMemory(-1));
+            Assert.ThrowsExactly<ArgumentOutOfRangeException>(() => reader.ReadBytesAsMemory(int.MinValue));
+            Assert.AreEqual(2L, reader.DataAvailable);
+        }
+
+        [TestMethod]
         public void ReadBinary_reads_length_prefixed_payload()
         {
             var reader = new SshDataReader(new byte[] { 0x00, 0x00, 0x00, 0x03, 0x61, 0x62, 0x63, 0x7F });
