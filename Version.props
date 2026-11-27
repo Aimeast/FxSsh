@@ -7,8 +7,8 @@
 
   <PropertyGroup>
     <!-- Update these as needed to represent SemVer version -->
-    <Version>1.4.0</Version>
-    <AssemblyVersion>1.4.0.0</AssemblyVersion>
+    <Version>1.5.0</Version>
+    <AssemblyVersion>1.5.0.0</AssemblyVersion>
   </PropertyGroup>
 
 </Project>
