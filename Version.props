@@ -1,0 +1,14 @@
+﻿<Project>
+
+  <!--
+    Use this file to define the Solution-wide DEFAULT Version string for projects.
+    Each project can choose to use this version by pulling in these MSBuild props.
+    -->
+
+  <PropertyGroup>
+    <!-- Update these as needed to represent SemVer version -->
+    <Version>1.4.0</Version>
+    <AssemblyVersion>1.4.0.0</AssemblyVersion>
+  </PropertyGroup>
+
+</Project>

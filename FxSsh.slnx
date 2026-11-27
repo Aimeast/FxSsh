@@ -4,7 +4,9 @@
     <File Path="README_zh-cn.md" />
   </Folder>
   <Project Path="FxSsh/FxSsh.csproj" />
+  <Project Path="FxSsh.Ed25519/FxSsh.Ed25519.csproj" />
   <Project Path="FxSsh.IntegrationTests/FxSsh.IntegrationTests.csproj" />
   <Project Path="FxSsh.Tests/FxSsh.Tests.csproj" />
+  <Project Path="FxSsh.Ed25519.Tests/FxSsh.Ed25519.Tests.csproj" />
   <Project Path="SshServerLoader/SshServerLoader.csproj" />
 </Solution>

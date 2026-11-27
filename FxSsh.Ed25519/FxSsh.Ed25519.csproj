@@ -1,0 +1,46 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <!-- NativeAOT / trimming compatibility: IL2xxx warnings surface any new
+         reflection/dynamic-dispatch that would break AOT publish. -->
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!-- Pull in the solution-wide default version -->
+  <Import Project="$(MSBuildProjectDirectory)/../Version.props" />
+
+  <PropertyGroup>
+    <Authors>Aimeast</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/Aimeast/FxSsh</RepositoryUrl>
+    <PackageTags>ssh,ssh-reinforcement,ssh-server,csharp,dotnet-core</PackageTags>
+    <Description>FxSsh support for Ed25519 host keys.</Description>
+    <!-- <SignAssembly>true</SignAssembly> -->
+    <AssemblyOriginatorKeyFile>../FxSsh/FxSsh.snk</AssemblyOriginatorKeyFile>
+    <Copyright>Copyright (c) Aimeast 2015-$([System.DateTime]::Now.Year)</Copyright>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="FxSsh.Tests" Key="0024000004800000940000000602000000240000525341310004000001000100259ce547d3f0a18803dd5d99085a2c56e21a75a91346f022709275f85ef35050a15086f4012018fbc0817b4b6c2f5ed4386d1aecc4ecb02cb48eb45c8baf266ffcdf1c615bdd225044bba092cb2d41b6b89bbe904d89dd8105f2e1f447056d99215e874d0dbbb3d6d9d8c212a238e9793dfa3e68ec8a07e40ec2c2ab7c3d8fe5" />
+    <InternalsVisibleTo Include="FxSsh.Ed25519.Tests" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <RootNamespace>FxSsh.Algorithms</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="BouncyCastle.Cryptography" Version="2.7.0" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\FxSsh\FxSsh.csproj" />
+  </ItemGroup>
+
+</Project>
