@@ -8,13 +8,17 @@
     <IsTrimmable>true</IsTrimmable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+
+  <!-- Pull in the solution-wide default version -->
+  <Import Project="$(MSBuildProjectDirectory)/../Version.props" />
+
+  <PropertyGroup>
     <Authors>Aimeast</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <RepositoryUrl>https://github.com/Aimeast/FxSsh</RepositoryUrl>
     <PackageTags>ssh,ssh-reinforcement,ssh-server,csharp,dotnet-core</PackageTags>
     <Description>FxSsh is a lightweight SSH server side library.</Description>
-    <Version>1.4.0</Version>
-    <AssemblyVersion>1.4.0.0</AssemblyVersion>
     <SignAssembly>true</SignAssembly>
     <AssemblyOriginatorKeyFile>FxSsh.snk</AssemblyOriginatorKeyFile>
     <Copyright>Copyright (c) Aimeast 2015-$([System.DateTime]::Now.Year)</Copyright>
