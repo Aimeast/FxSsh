@@ -1,7 +1,7 @@
 ﻿
 # README - Ed25519 Public Key Extension for FxSsh
 
-This package implements an implementation of the Ed25519 Edwards curve for public key
+This package provides an implementation of the Ed25519 Edwards curve for public key
 authentication for FxSsh as defined in [RFC 8709](https://www.rfc-editor.org/info/rfc8709/).
 
 Ed25519 does not support any parameters like other supported public key algorithms
