@@ -237,5 +237,86 @@ namespace FxSsh.Tests.Services
                 server.Dispose();
             }
         }
+
+        [TestMethod]
+        public async Task First_kex_packet_is_discarded_when_the_client_first_choice_is_not_the_server_first_choice()
+        {
+            // RFC 4253 7.1: a guess is right only when both sides prefer the
+            // same kex and host key algorithm. Here the server supports the
+            // client's first kex but ranks another one higher, so the client
+            // (e.g. dropbear 2018.76) guessed wrong and resends KEXDH_INIT.
+            // The server must ignore the guessed packet and reply only once.
+            const string ClientKex = "curve25519-sha256";
+            var (client, server) = CreateSocketPair();
+            try
+            {
+                var session = CreateSession(server);
+                var disconnected = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+                session.Disconnected += (_, _) => disconnected.TrySetResult(true);
+                _ = session.StartAsync();
+
+                using var stream = new NetworkStream(client, ownsSocket: false) { ReadTimeout = 5000 };
+                Assert.AreEqual("SSH-2.0-Unit", ReadLine(stream));
+                SendClientBanner(stream);
+
+                var serverKexInit = new KeyExchangeInitMessage();
+                serverKexInit.Load(ReadPacket(stream));
+                CollectionAssert.Contains(serverKexInit.KeyExchangeAlgorithms, ClientKex);
+                Assert.AreNotEqual(ClientKex, serverKexInit.KeyExchangeAlgorithms[0],
+                    "test needs a server that prefers a different kex than the client");
+
+                WritePacket(stream, new KeyExchangeInitMessage
+                {
+                    KeyExchangeAlgorithms = [ClientKex],
+                    ServerHostKeyAlgorithms = ["ecdsa-sha2-nistp256"],
+                    EncryptionAlgorithmsClientToServer = ["aes256-ctr"],
+                    EncryptionAlgorithmsServerToClient = ["aes256-ctr"],
+                    MacAlgorithmsClientToServer = ["hmac-sha2-256"],
+                    MacAlgorithmsServerToClient = ["hmac-sha2-256"],
+                    CompressionAlgorithmsClientToServer = ["none"],
+                    CompressionAlgorithmsServerToClient = ["none"],
+                    LanguagesClientToServer = [""],
+                    LanguagesServerToClient = [""],
+                    FirstKexPacketFollows = true,
+                }.GetPacket());
+
+                // The guessed KEXDH_INIT carries a malformed 5-byte Q_C, so
+                // processing it instead of discarding it would fail the exchange.
+                WritePacket(stream, new byte[] { 30, 0, 0, 0, 1, 0 });
+
+                var publicKey = new byte[32];
+                Random.Shared.NextBytes(publicKey);
+                var init = new byte[1 + 4 + publicKey.Length];
+                init[0] = 30;
+                init[4] = (byte)publicKey.Length;
+                publicKey.CopyTo(init, 5);
+                WritePacket(stream, init);
+
+                var replies = 0;
+                stream.ReadTimeout = 1000;
+                try
+                {
+                    while (true)
+                    {
+                        var payload = ReadPacket(stream);
+                        if (payload[0] == 31)
+                            replies++;
+                    }
+                }
+                catch (IOException)
+                {
+                    // Read timeout: the server has nothing more to send.
+                }
+
+                Assert.AreEqual(1, replies, "server must answer only the resent KEXDH_INIT");
+                Assert.IsFalse(disconnected.Task.IsCompleted);
+                session.Disconnect();
+            }
+            finally
+            {
+                client.Dispose();
+                server.Dispose();
+            }
+        }
     }
 }
