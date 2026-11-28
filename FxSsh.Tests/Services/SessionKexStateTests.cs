@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading.Tasks;
 using FxSsh;
@@ -238,15 +239,57 @@ namespace FxSsh.Tests.Services
             }
         }
 
+        /// <summary>
+        /// Builds a KEXDH_INIT (SSH_MSG_KEX_ECDH_INIT, 30) whose Q_C matches
+        /// <paramref name="kex"/>: 32 random bytes for curve25519, an
+        /// uncompressed EC point for ecdh-sha2-nistp*. Returns null for kex
+        /// algorithms this helper cannot build (e.g. hybrid post-quantum).
+        /// </summary>
+        private static byte[]? BuildKexdhInitPayload(string kex)
+        {
+            byte[] q;
+            if (kex.StartsWith("curve25519-", StringComparison.Ordinal))
+            {
+                q = new byte[32];
+                Random.Shared.NextBytes(q);
+            }
+            else if (kex.StartsWith("ecdh-sha2-nistp", StringComparison.Ordinal))
+            {
+                var curve = kex switch
+                {
+                    "ecdh-sha2-nistp256" => ECCurve.NamedCurves.nistP256,
+                    "ecdh-sha2-nistp384" => ECCurve.NamedCurves.nistP384,
+                    "ecdh-sha2-nistp521" => ECCurve.NamedCurves.nistP521,
+                    _ => throw new InvalidOperationException($"unknown ECDH curve in '{kex}'"),
+                };
+                using var ecdh = ECDiffieHellman.Create(curve);
+                var point = ecdh.PublicKey.ExportParameters().Q;
+                q = new byte[1 + point.X!.Length + point.Y!.Length];
+                q[0] = 0x04;
+                point.X.CopyTo(q, 1);
+                point.Y.CopyTo(q, 1 + point.X.Length);
+            }
+            else
+                return null;
+
+            var payload = new byte[1 + 4 + q.Length];
+            payload[0] = 30;
+            payload[3] = (byte)(q.Length >> 8);
+            payload[4] = (byte)q.Length;
+            q.CopyTo(payload, 5);
+            return payload;
+        }
+
         [TestMethod]
         public async Task First_kex_packet_is_discarded_when_the_client_first_choice_is_not_the_server_first_choice()
         {
             // RFC 4253 7.1: a guess is right only when both sides prefer the
-            // same kex and host key algorithm. Here the server supports the
-            // client's first kex but ranks another one higher, so the client
-            // (e.g. dropbear 2018.76) guessed wrong and resends KEXDH_INIT.
-            // The server must ignore the guessed packet and reply only once.
-            const string ClientKex = "curve25519-sha256";
+            // same kex and host key algorithm. The client picks a kex the
+            // server supports but does not rank first (which one depends on
+            // the crypto backend, e.g. mlkem is absent on Windows CNG), so
+            // its guess is wrong and it resends KEXDH_INIT, as dropbear
+            // 2018.76 does. The server must ignore the guessed packet and
+            // reply only once.
             var (client, server) = CreateSocketPair();
             try
             {
@@ -261,13 +304,25 @@ namespace FxSsh.Tests.Services
 
                 var serverKexInit = new KeyExchangeInitMessage();
                 serverKexInit.Load(ReadPacket(stream));
-                CollectionAssert.Contains(serverKexInit.KeyExchangeAlgorithms, ClientKex);
-                Assert.AreNotEqual(ClientKex, serverKexInit.KeyExchangeAlgorithms[0],
-                    "test needs a server that prefers a different kex than the client");
+                string? clientKex = null;
+                byte[]? kexdhInit = null;
+                foreach (var candidate in serverKexInit.KeyExchangeAlgorithms[1..])
+                {
+                    if (candidate.StartsWith("kex-strict-", StringComparison.Ordinal) || candidate.StartsWith("ext-info-", StringComparison.Ordinal))
+                        continue;
+                    kexdhInit = BuildKexdhInitPayload(candidate);
+                    if (kexdhInit != null)
+                    {
+                        clientKex = candidate;
+                        break;
+                    }
+                }
+                if (clientKex == null)
+                    Assert.Inconclusive("server offers no buildable kex other than its first choice");
 
                 WritePacket(stream, new KeyExchangeInitMessage
                 {
-                    KeyExchangeAlgorithms = [ClientKex],
+                    KeyExchangeAlgorithms = [clientKex!],
                     ServerHostKeyAlgorithms = ["ecdsa-sha2-nistp256"],
                     EncryptionAlgorithmsClientToServer = ["aes256-ctr"],
                     EncryptionAlgorithmsServerToClient = ["aes256-ctr"],
@@ -284,13 +339,7 @@ namespace FxSsh.Tests.Services
                 // processing it instead of discarding it would fail the exchange.
                 WritePacket(stream, new byte[] { 30, 0, 0, 0, 1, 0 });
 
-                var publicKey = new byte[32];
-                Random.Shared.NextBytes(publicKey);
-                var init = new byte[1 + 4 + publicKey.Length];
-                init[0] = 30;
-                init[4] = (byte)publicKey.Length;
-                publicKey.CopyTo(init, 5);
-                WritePacket(stream, init);
+                WritePacket(stream, kexdhInit);
 
                 var replies = 0;
                 stream.ReadTimeout = 1000;
