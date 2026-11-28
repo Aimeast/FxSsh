@@ -150,10 +150,12 @@ namespace FxSsh.IntegrationTests.Integration
             // unaffected; only the overwrite path is covered here.
             File.WriteAllText(Path.Combine(server.RootPath, "scp-uploaded.txt"), "placeholder");
 
-            // OpenSSH 9+ runs scp over the SFTP subsystem by default.
+            // OpenSSH 9+ runs scp over the SFTP subsystem by default; -s
+            // forces it on older clients too (e.g. 8.9 on ubuntu-22.04),
+            // which would otherwise exec a remote "scp -t".
             var upload = OpenSshClient.RunProcess(
                 OpenSshClient.FindTool("scp")!,
-                $"{OpenSshClient.CommonOptions(server.Port, key, fileTransferTool: true)} \"{localFile}\" {OpenSshClient.Target(TestSshServer.Username)}:scp-uploaded.txt",
+                $"{OpenSshClient.CommonOptions(server.Port, key, fileTransferTool: true)} -s \"{localFile}\" {OpenSshClient.Target(TestSshServer.Username)}:scp-uploaded.txt",
                 timeoutMs: 120_000);
             Assert.AreEqual(0, upload.ExitCode, $"stderr: {upload.StandardError}\nstdout: {upload.StandardOutput}");
             Assert.AreEqual(expectedHash, LocalHash(Path.Combine(server.RootPath, "scp-uploaded.txt")));
@@ -161,7 +163,7 @@ namespace FxSsh.IntegrationTests.Integration
             var downloadPath = Path.Combine(_tempDir, "scp-downloaded.txt");
             var download = OpenSshClient.RunProcess(
                 OpenSshClient.FindTool("scp")!,
-                $"{OpenSshClient.CommonOptions(server.Port, key, fileTransferTool: true)} {OpenSshClient.Target(TestSshServer.Username)}:scp-uploaded.txt \"{downloadPath}\"",
+                $"{OpenSshClient.CommonOptions(server.Port, key, fileTransferTool: true)} -s {OpenSshClient.Target(TestSshServer.Username)}:scp-uploaded.txt \"{downloadPath}\"",
                 timeoutMs: 120_000);
             Assert.AreEqual(0, download.ExitCode, $"stderr: {download.StandardError}");
             Assert.AreEqual(expectedHash, LocalHash(downloadPath));

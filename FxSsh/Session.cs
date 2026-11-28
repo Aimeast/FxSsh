@@ -2236,7 +2236,10 @@ namespace FxSsh
                 if (serverAlgorithms.Contains(clientAlgorithm))
                 {
                     chosenAlgorithm = clientAlgorithm;
-                    return clientAlgorithm == clientAlgorithms[0];
+                    // RFC 4253 7.1: a guess is right only when both sides prefer
+                    // the same algorithm. A client whose first choice the server
+                    // supports but ranks lower guessed wrong and will resend.
+                    return clientAlgorithm == clientAlgorithms[0] && clientAlgorithm == serverAlgorithms[0];
                 }
 
             throw new SshConnectionException("Failed to negotiate algorithm.", DisconnectReason.KeyExchangeFailed);
