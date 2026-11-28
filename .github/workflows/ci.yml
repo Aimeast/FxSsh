@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04, windows-latest, windows-2025, windows-2022]
     steps:
       - uses: actions/checkout@v7
 
@@ -72,7 +72,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        os: [ubuntu-latest, ubuntu-24.04, ubuntu-22.04, windows-latest, windows-2025, windows-2022]
     steps:
       - uses: actions/checkout@v7
 

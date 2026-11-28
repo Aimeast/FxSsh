@@ -336,12 +336,14 @@ namespace FxSsh.IntegrationTests.Integration
             var key = OpenSshClient.GenerateKeyPair(_tempDir);
             server.AcceptedFingerprints.Add("*");
 
+            // -s forces the SFTP protocol on clients older than OpenSSH 9
+            // (e.g. 8.9 on ubuntu-22.04), which default to a remote "scp -t".
             var newFile = Path.Combine(_tempDir, "scp-new.bin");
             var expectedHash = WriteRandomFile(newFile, 1024 * 1024);
 
             var upload = OpenSshClient.RunProcess(
                 OpenSshClient.FindTool("scp")!,
-                $"{OpenSshClient.CommonOptions(server.Port, key, fileTransferTool: true)} " +
+                $"{OpenSshClient.CommonOptions(server.Port, key, fileTransferTool: true)} -s " +
                 $"\"{newFile}\" {OpenSshClient.Target(TestSshServer.Username)}:scp-new.bin",
                 timeoutMs: 120_000);
             Assert.AreEqual(0, upload.ExitCode, $"stderr: {upload.StandardError}");
@@ -354,7 +356,7 @@ namespace FxSsh.IntegrationTests.Integration
 
             var recursive = OpenSshClient.RunProcess(
                 OpenSshClient.FindTool("scp")!,
-                $"{OpenSshClient.CommonOptions(server.Port, key, fileTransferTool: true)} -r " +
+                $"{OpenSshClient.CommonOptions(server.Port, key, fileTransferTool: true)} -s -r " +
                 $"\"{tree}\" {OpenSshClient.Target(TestSshServer.Username)}:tree-copy",
                 timeoutMs: 120_000);
             Assert.AreEqual(0, recursive.ExitCode, $"stderr: {recursive.StandardError}");
